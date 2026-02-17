@@ -9,13 +9,13 @@ from torchaudio.transforms import MelSpectrogram
 # Inspired by https://github.com/openai/whisper/blob/main/whisper/audio.py
 
 
-SAMPLE_RATE = 16000               # "All audio is re-sampled to 16,000 Hz"
-DEFAULT_AUDIO_LENGTH_SECONDS = 30 # "We break audio files into 30-second segments"
+SAMPLE_RATE = 16000                                    # "All audio is re-sampled to 16,000 Hz"
+DEFAULT_AUDIO_LENGTH_SECONDS = 30                      # "We break audio files into 30-second segments"
 N_SAMPLES = SAMPLE_RATE * DEFAULT_AUDIO_LENGTH_SECONDS # 30s at 16kHz = 480,000 samples
 
-N_FFT = 400       # "on 25-millisecond windows"        -> 25ms window @ 16kHz = 400 samples
-HOP_LENGTH = 160  # "with a stride of 10 milliseconds" -> 10ms stride @ 16kHz = 160 samples
-N_MELS = 80       # "and an 80-channel log-magnitude Mel spectrogram representation is computed"
+N_FFT = 400      # "on 25-millisecond windows"        -> 25ms window @ 16kHz = 400 samples
+STRIDE = 160     # "with a stride of 10 milliseconds" -> 10ms stride @ 16kHz = 160 samples
+N_MEL_BINS = 80  # "and an 80-channel log-magnitude Mel spectrogram representation is computed"
 
 def load_and_resample(path: str, target_sr: int = 16000) -> torch.Tensor:
     """
@@ -68,16 +68,16 @@ def pad_or_trim(array, length: int = N_SAMPLES, axis: int = -1):
 def compute_log_mel_spectrogram(
     waveform: torch.Tensor,
     sample_rate: int = SAMPLE_RATE,
-    n_mels: int = N_MELS,
+    n_mel_bins: int = N_MEL_BINS,
     n_fft: int = N_FFT,
-    hop_length: int = HOP_LENGTH,
+    hop_length: int = STRIDE,
 ) -> torch.Tensor:
     """
     Convert the audio waveform to a log(10)-magnitude Mel spectrogram.
 
     :param waveform:    (1, T) mono audio waveform at 16kHz
     :param sample_rate: "All audio is re-sampled to 16,000 Hz"
-    :param n_mels:      "and an 80-channel log-magnitude Mel spectrogram representation is computed"
+    :param n_mel_bins:  "and an 80-channel log-magnitude Mel spectrogram representation is computed"
     :param n_fft:       "on 25-millisecond windows"        -> 25ms window @ 16kHz = 400 samples
     :param hop_length:  "with a stride of 10 milliseconds" -> 10ms stride @ 16kHz = 160 samples
     :return:             Log-magnitude Mel spectrogram of shape (1, n_mels, T') where T' depends on the length of the input waveform and the hop_length
@@ -86,7 +86,7 @@ def compute_log_mel_spectrogram(
         sample_rate=sample_rate,
         n_fft=n_fft,
         hop_length=hop_length,
-        n_mels=n_mels,
+        n_mels=n_mel_bins,
         window_fn=torch.hann_window,
     )
     T = waveform.shape[1]
@@ -100,7 +100,7 @@ def compute_log_mel_spectrogram(
     assert T_ == (T // hop_length) + 1
     mel = mel[:,:,:-1]
     log_mel = torch.log10(mel.clamp(min=1e-10))
-    return log_mel
+    return log_mel  # (1, n_mels, T')
 
 
 def normalize(log_mel: torch.Tensor) -> torch.Tensor:
