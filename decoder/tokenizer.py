@@ -1,16 +1,22 @@
-class BPD_Tokenizer:
+from copy import deepcopy
+
+class BPE_Tokenizer:
     def __init__(self):
         self.merges = {}
         self.raw_text = None
         self.byte_text = None
         self.merges = {}
+        
+    def text_to_byte(self, text):
+        return list(map(int, text))
 
     def load_raw(self, vocab_file):
         # Load the raw text data from the specified file
         with open(vocab_file, 'r', encoding='utf-8') as f:
             txt = f.read()
             self.raw_text = txt.replace('\n', ' ')
-            self.byte_text = list(map(int, self.raw_text))
+            self.byte_text = self.text_to_byte(self.raw_text)
+        return self.byte_text, self.raw_text
         
     def get_stats(self, text):
         if text is None:
@@ -43,19 +49,30 @@ class BPD_Tokenizer:
             idx = 256 + i
             self.byte_text = self.merge(self.byte_text, top_pair, idx)
             self.merges[top_pair] = idx
+        return self.byte_text, self.merges
         
 
-    def encode(self, iters=10):
-        tokens = self.byte_text.copy()
-        for _ in range(iters):
-            stats = self.get_stats()
-            if not stats:
+    def encode(self, text):
+        # Encode the input
+        if isinstance(text, str):
+            text = self.text_to_byte(text)
+        tokens = deepcopy(text)
+        while len(tokens) >= 2:
+            stats = self.get_stats(tokens)
+            pair = min(stats, key=lambda x: self.merges.get(x, float('inf')))
+            if pair not in self.merges:
                 break
-            max_pair = max(stats, key=stats.get)
-            self.merges[max_pair] = len(self.vocab)
-            tokens = [self.merges.get((tokens[i], tokens[i+1]), tokens[i]) for i in range(len(tokens)-1)]
+            idx = self.merges[pair]
+            tokens = self.merge(tokens, pair, idx)
         return tokens
 
-    def decode(self, token_ids):
-        tokens = [self.inv_vocab.get(token_id, '[UNK]') for token_id in token_ids]
-        return ' '.join(tokens)
+    def decode(self, encoded_tokens):
+        # Decode the input
+        def single_decode(_id):
+            if _id < 256:
+                return chr(_id)
+            else:
+                pair = [k for k, v in self.merges.items() if v == _id][0]
+                return single_decode(pair[0]) + single_decode(pair[1])
+        return ''.join(single_decode(id) for id in encoded_tokens)
+            
