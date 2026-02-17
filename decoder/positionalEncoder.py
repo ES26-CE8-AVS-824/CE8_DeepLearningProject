@@ -3,10 +3,10 @@ import torch
 import torch.nn as nn
 
 class LearnedPositionalEncoding(nn.Module):
-    def __init__(self, max_len: int, d_model: int):
+    def __init__(self, max_len: int, d_model: int, vocab_size: int = 1000):
         super().__init__()
         self.d_model = d_model
-        self.vocab_size = max_len
+        self.vocab_size = vocab_size
         # Max len = iters + 256 (initial vocab size), d_model = 128/256 (toy example)
         self.positional_embeddings = nn.Embedding(max_len, d_model)
                 
