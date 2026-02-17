@@ -1,13 +1,16 @@
 from copy import deepcopy
+from itertools import islice
+import time
+import collections
 
 class BPE_Tokenizer:
     def __init__(self):
         self.merges = {}
         self.raw_text = None
         self.byte_text = None
-        self.merges = {}
         
     def text_to_byte(self, text):
+        text = text.encode('utf-8')
         return list(map(int, text))
 
     def load_raw(self, vocab_file):
@@ -17,17 +20,21 @@ class BPE_Tokenizer:
             self.raw_text = txt.replace('\n', ' ')
             self.byte_text = self.text_to_byte(self.raw_text)
         return self.byte_text, self.raw_text
+    
+    def load_merges(self, merges_file):
+        # Load the merges from the specified file
+        with open(merges_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                pair, idx = line.strip().rsplit(' ', 1)
+                self.merges[tuple(map(int, pair.split()))] = int(idx)
         
     def get_stats(self, text):
         if text is None:
             raise ValueError("Raw text not loaded. Call load_raw() first.")
         # Count the frequency of each byte in the byte text
-        counts = {}
-        for pair in zip(text, text[1:]):
-            counts[pair] = counts.get(pair, 0) + 1
-        return counts
+        return collections.Counter(zip(text, islice(text, 1, None))) 
     
-    def merge(ids, pair, idx):
+    def merge(self, ids, pair, idx):
         # Merge the specified pair of tokens in the list of token IDs
         new_ids = []
         i = 0
@@ -43,12 +50,14 @@ class BPE_Tokenizer:
     def train(self, vocab_file, iters=10):
         # Train the tokenizer through input text
         self.load_raw(vocab_file)
+        t1 = time.time()
         for i in range(iters):
             stats = self.get_stats(self.byte_text)
             top_pair = max(stats, key=stats.get)
             idx = 256 + i
             self.byte_text = self.merge(self.byte_text, top_pair, idx)
             self.merges[top_pair] = idx
+        print(f"Training completed in {time.time() - t1:.2f} seconds.")
         return self.byte_text, self.merges
         
 
@@ -76,3 +85,15 @@ class BPE_Tokenizer:
                 return single_decode(pair[0]) + single_decode(pair[1])
         return ''.join(single_decode(id) for id in encoded_tokens)
             
+            
+if __name__ == "__main__":
+    Tokenizer = BPE_Tokenizer()
+    bt, rt = Tokenizer.train('decoder/test_text.txt', iters=1000)
+    # save tokens
+    with open('decoder/merges.txt', 'w') as f:
+        for pair, idx in Tokenizer.merges.items():
+            f.write(f"{pair[0]} {pair[1]} {idx}\n")
+    encoded_txt = Tokenizer.encode('Hello, world!')
+    print("Encoded:", encoded_txt)
+    decoded_txt = Tokenizer.decode(encoded_txt)
+    print("Decoded:", decoded_txt)
