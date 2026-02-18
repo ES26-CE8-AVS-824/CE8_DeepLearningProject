@@ -1,6 +1,6 @@
 import torch
 
-from data_loading import create_librispeech_dataloader
+from data_loading import LibriSpeechAudioPreprocessingDataLoader
 from encoder.preprocessing_stem import AudioEncoderStem
 
 
@@ -9,7 +9,9 @@ def main():
     # TODO: this is only a dummy script to test the data loading and preprocessing pipeline, and the encoder stem
 
     # Configuration
-    DATA_DIR = "data/LibriSpeech/dev-clean"
+    SPLIT = "dev-clean"
+    DATA_DIR = "./data"
+    FOLDER_IN_ARCHIVE = "LibriSpeech"
     BATCH_SIZE = 16
     N_MELS = 80
     D_MODEL = 512
@@ -22,12 +24,14 @@ def main():
     print(f"\nCreating DataLoader for: {DATA_DIR}")
     print(f"Batch size: {BATCH_SIZE}")
 
-    dataloader = create_librispeech_dataloader(
+    dataloader = LibriSpeechAudioPreprocessingDataLoader(
+        split=SPLIT,
         root_dir=DATA_DIR,
+        folder_in_archive=FOLDER_IN_ARCHIVE,
+        download_dataset=True,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=0,  # Set to 0 for debugging; increase for faster loading
-        preload_data=False,  # Set to True to load all audio into memory
+        num_workers=2,
     )
 
     print(f"\nDataLoader created with {len(dataloader.dataset)} samples")
