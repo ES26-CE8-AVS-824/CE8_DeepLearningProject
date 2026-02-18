@@ -1,6 +1,6 @@
-from torch import nn, Tensor
-import torch
 import torch.nn.functional as F
+from torch import nn, Tensor
+
 
 class MultiHeadAttention(nn.Module):
     """
@@ -16,7 +16,7 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, n_head: int):
         super().__init__()
         self.n_head = n_head
-        self.query = nn.Linear(d_model, d_model) # In whisper, they have create their own Linear class representation, not sure if needed
+        self.query = nn.Linear(d_model, d_model) # In whisper, they have created their own Linear class representation, not sure if needed
         self.key = nn.Linear(d_model, d_model)
         self.value = nn.Linear(d_model, d_model)
         self.out = nn.Linear(d_model, d_model)
@@ -38,7 +38,7 @@ class MultiHeadAttention(nn.Module):
         k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
         
-        qk = (q * scale) @ (k * scale).transpose(-1, -2) # scaled dotproduct of q and k
+        qk = (q * scale) @ (k * scale).transpose(-1, -2) # scaled dot product of q and k
         if mask is not None:
             qk = qk + mask[:seq_len, :seq_len] # Applies attention mask
         qk = qk.float() # Cast to f32 for numerical stability during softmax
@@ -58,7 +58,7 @@ class TransformerBlock(nn.Module):
         self.cross_attention = MultiHeadAttention(d_model, n_head) if cross_attention else None
         self.cross_attention_ln = nn.LayerNorm(d_model) if cross_attention else None
         
-        n_mlp = d_model * 4
+        n_mlp = d_model * 4  # In whisper at least, the feedforward network has an inner dimension 4 times the model dimension
         self.ff = nn.Sequential(
             nn.Linear(d_model, n_mlp),
             nn.GELU(),

@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from audio import compute_log_mel_spectrogram, normalize
+from mini_whisper.audio import compute_log_mel_spectrogram, normalize
 
 
 def sinusoidal_positional_embedding(

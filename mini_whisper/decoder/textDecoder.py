@@ -1,6 +1,5 @@
-from decoder.tokenizer import BPE_Tokenizer
-from decoder.positionalEncoder import LearnedPositionalEncoding
-from .MHA import MultiHeadAttention
+from mini_whisper.decoder.positionalEncoder import LearnedPositionalEncoding
+from mini_whisper.transformer.MHA import MultiHeadAttention
 from torch import Tensor
 from torch import nn
 import torch

@@ -10,7 +10,7 @@ def main():
 
     # Configuration
     SPLIT = "dev-clean"
-    DATA_DIR = "./data"
+    DATA_DIR = "../data"
     FOLDER_IN_ARCHIVE = "LibriSpeech"
     BATCH_SIZE = 16
     N_MELS = 80

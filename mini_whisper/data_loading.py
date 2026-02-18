@@ -5,7 +5,7 @@ import torchaudio
 from torch.utils.data import DataLoader, Dataset
 from torchaudio.datasets import LIBRISPEECH
 
-from audio import pad_or_trim, compute_log_mel_spectrogram, normalize, SAMPLE_RATE
+from mini_whisper.audio import pad_or_trim, compute_log_mel_spectrogram, normalize, SAMPLE_RATE
 
 
 class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
