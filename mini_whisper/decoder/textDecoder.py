@@ -17,7 +17,7 @@ class TextDecoder(nn.Module):
         x = self.token_emb(x) + self.pos_enc(x)
         x = x.to(cross_x.dtype)
         for block in self.blocks:
-            x = block(x, cross_x, cross_x, mask=self.mask)
+            x = block(x, cross_x=cross_x, mask=self.mask)[0]  # Use cross-attention, take only the output (not qk)
         x = self.ln(x)
         logits = x @ torch.transpose(self.token_emb.weight.to(x.dtype), 0, 1)
         return logits
