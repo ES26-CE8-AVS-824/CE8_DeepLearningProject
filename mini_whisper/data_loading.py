@@ -5,6 +5,7 @@ import torchaudio
 from torch.utils.data import DataLoader, Dataset
 from torchaudio.datasets import LIBRISPEECH
 
+from mini_whisper import N_MEL_BINS
 from mini_whisper.audio import pad_or_trim, compute_log_mel_spectrogram, normalize, SAMPLE_RATE
 
 
@@ -32,15 +33,29 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
             shuffle: bool = True,
             num_workers: int = 2,
             target_sr: int = SAMPLE_RATE,
+            n_mel_bins: int = N_MEL_BINS,
             **kwargs
     ):
         """
         Args:
-            dataset: Any audio dataset (e.g., LIBRISPEECH) that returns (waveform, sample_rate, transcript, ...)
-            batch_size: Batch size for DataLoader
-            shuffle: Whether to shuffle the dataset
-            num_workers: Number of worker processes for data loading
-            **kwargs: Additional arguments to pass to DataLoader
+            split:
+                Which LibriSpeech split to load (e.g., 'train-clean-100', 'dev-clean', 'test-clean')
+            root_dir:
+                Root directory where the dataset is stored or will be downloaded to
+            folder_in_archive:
+                Top-level folder in the archive (usually "LibriSpeech")
+            download_dataset:
+                Whether to download the dataset if not found
+            batch_size:
+                Batch size for DataLoader
+            shuffle:
+                Whether to shuffle the data each epoch
+            num_workers:
+                Number of subprocesses for data loading
+            target_sr:
+                Target sample rate for audio (default 16kHz)
+            n_mel_bins:
+                Number of Mel bins for spectrogram (default 80)
         """
         dataset = LIBRISPEECH(
             root=root_dir,
@@ -60,6 +75,7 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
         )
 
         self.target_sr = target_sr
+        self.n_mel_bins = n_mel_bins
 
     def _collate_and_preprocess(self, batch: List[tuple]) -> Dict[str, Any]:
         """
@@ -94,7 +110,7 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
             waveform = pad_or_trim(waveform)
 
             # Compute log-mel spectrogram
-            log_mel = compute_log_mel_spectrogram(waveform)
+            log_mel = compute_log_mel_spectrogram(waveform, n_mel_bins=self.n_mel_bins)
 
             # Normalize
             log_mel = normalize(log_mel)
