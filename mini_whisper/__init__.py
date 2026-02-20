@@ -37,16 +37,31 @@ from .encoder.preprocessing_stem import (
     AudioEncoderStem,
     sinusoidal_positional_embedding,
 )
-
-# Model
-from .model import (
-    MiniWhisper,
+from .encoder.audioEncoder import (
     AudioEncoder,
 )
 
-# Tokenizer
-from .tokenizer_wrapper import (
-    WhisperTokenizer,
+# Decoder components
+from .decoder.textDecoder import (
+    TextDecoder,
+)
+from .decoder.positionalEncoder import (
+    LearnedPositionalEncoding,
+)
+
+# Transformer components
+from .transformer.MHA import (
+    MultiHeadAttention,
+    TransformerBlock,
+)
+from .transformer.MHA_simple import (
+    SimpleMultiHeadAttention,
+    SimpleTransformerBlock,
+)
+
+# Complete model
+from .model import (
+    MiniWhisper,
 )
 
 # Define what gets imported with "from mini_whisper import *"
@@ -66,10 +81,18 @@ __all__ = [
     # Encoder
     "AudioEncoderStem",
     "sinusoidal_positional_embedding",
-    # Model
-    "MiniWhisper",
     "AudioEncoder",
-    # Tokenizer
-    "WhisperTokenizer",
+    # Decoder
+    "TextDecoder",
+    "LearnedPositionalEncoding",
+    # Transformer
+    "MultiHeadAttention",
+    "TransformerBlock",
+    "SimpleMultiHeadAttention",
+    "SimpleTransformerBlock",
+    # Complete model
+    "MiniWhisper",
 ]
+
+
 

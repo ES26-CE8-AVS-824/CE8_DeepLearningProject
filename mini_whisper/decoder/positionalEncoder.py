@@ -40,7 +40,8 @@ class ToyTransformer(nn.Module):
 
         
 if __name__ == "__main__":
-    import tokenizer
+    from mini_whisper.tokenizer import tokenizer
+
     Tokenizer = tokenizer.BPE_Tokenizer()
     Tokenizer.load_merges('decoder/merges.txt')
 
