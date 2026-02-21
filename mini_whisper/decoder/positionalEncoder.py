@@ -2,20 +2,19 @@ import math
 import torch
 import torch.nn as nn
 
+from mini_whisper.tokenizer.tokenizer import BPE_Tokenizer
+
 class LearnedPositionalEncoding(nn.Module):
     def __init__(self, max_len: int, d_model: int, vocab_size: int = 1000):
         super().__init__()
-        self.d_model = d_model
-        self.vocab_size = vocab_size
-        # Max len = iters + 256 (initial vocab size), d_model = 128/256 (toy example)
         self.positional_embeddings = nn.Embedding(max_len, d_model)
                 
     def forward(self, x, device="cpu"):
-        # x: (batch, seq_len, d_model)    
-        batch_size, seq_len, d = x.size()
-        sq = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, seq_len)
-        pos_emb = self.positional_embeddings(sq)
-        return x + pos_emb
+        # x: (batch, seq_len)    
+        batch_size, seq_len = x.size()
+        positions = torch.arange(seq_len, device=self.positional_embeddings.weight.device)
+        positions = positions.unsqueeze(0).expand(batch_size, -1)  # [16, 1500]
+        return self.positional_embeddings(positions)  # [16, 1500, 128]
     
     
 class ToyTransformer(nn.Module):
@@ -28,8 +27,12 @@ class ToyTransformer(nn.Module):
         self.lm_head = nn.Linear(d_model, vocab_size)
 
     def forward(self, input_ids):
+        x = self.pos_enc(input_ids, device=input_ids.device)
+        print("After positional encoding shape:", x.shape)
         x = self.token_emb(input_ids) * math.sqrt(self.token_emb.embedding_dim)
-        x = self.pos_enc(x, device=input_ids.device)
+        print("Token embeddings shape:", x.shape)  # Debugging statement
+        
+          # Debugging statement
         x = self.encoder(x)
         x = self.lm_head(x)
 
@@ -40,10 +43,10 @@ class ToyTransformer(nn.Module):
 
         
 if __name__ == "__main__":
-    from mini_whisper.tokenizer import tokenizer
+    from mini_whisper.tokenizer.tokenizer import BPE_Tokenizer
 
-    Tokenizer = tokenizer.BPE_Tokenizer()
-    Tokenizer.load_merges('decoder/merges.txt')
+    Tokenizer = BPE_Tokenizer()
+    Tokenizer.load_merges('mini_whisper/decoder/merges.txt')
 
     txt = Tokenizer.encode('A text corpus (plural: corpora) is a large, structured, and typically digital collection of written or spoken language samples used for linguistic research, language modeling, and AI training. These datasets allow researchers to analyze word frequencies, syntax, and usage patterns to understand language structure and evolution. ')
     print("Encoded text:", txt, len(txt))
@@ -55,9 +58,10 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    embedding_layer = LearnedPositionalEncoding(max_len=1000+256, d_model=128).to(device)
-    transformer = ToyTransformer(vocab_size=1000+256, d_model=128, max_len=1000+256, n_layers=2, n_heads=4, device=device).to(device)
+    embedding_layer = LearnedPositionalEncoding(max_len=10000+256, d_model=128).to(device)
+    transformer = ToyTransformer(vocab_size=10000+256, d_model=128, max_len=1000+256, n_layers=2, n_heads=4, device=device).to(device)
     x_indicies = torch.tensor(chunks).to(device)
+    print("Input shape:", x_indicies.shape)  # Should be (batch_size, seq_len)
     output, probs, next_token = transformer(x_indicies)
     print("Output shape:", output.shape)  # Should be (batch_size, seq_len, vocab_size)
     print("Probs shape:", probs.shape)
