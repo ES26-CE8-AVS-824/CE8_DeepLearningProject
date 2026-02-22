@@ -57,6 +57,8 @@ class MiniWhisper(nn.Module):
 
         self.d_model = d_model
         self.vocab_size = vocab_size
+        self.max_text_len = max_text_len
+        
 
     def forward(
         self,

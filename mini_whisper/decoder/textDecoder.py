@@ -7,6 +7,7 @@ import torch
 class TextDecoder(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, max_len: int, n_layers: int, n_heads: int):
         super().__init__()
+        self.max_len = max_len
         self.token_emb = nn.Embedding(vocab_size, d_model)
         self.pos_enc = LearnedPositionalEncoding(max_len, d_model)
         self.blocks = nn.ModuleList([MultiHeadAttention(d_model, n_heads) for _ in range(n_layers)])
@@ -14,7 +15,6 @@ class TextDecoder(nn.Module):
         self.mask = None
 
     def forward(self, x: Tensor, cross_x: Tensor):
-        print(f'pos emb shape: {self.pos_enc(x)[0:0+x.shape[-1]].shape}, token shape: {self.token_emb(x).shape}')  # Debugging statement to check shapes
         x = self.token_emb(x) + self.pos_enc(x)[0:0+x.shape[-1]] 
         x = x.to(cross_x.dtype)
         for block in self.blocks:
@@ -64,4 +64,4 @@ if __name__ == "__main__":
         greedy_token = torch.argmax(F.softmax(logits, dim=-1), dim=-1)  # [16, seq_len]
         print(f'greedy token shape: {greedy_token.shape}')  # Should be [16, seq_len]
         print(f'greedy token for first position in first batch item: {greedy_token[0, 0]}')
-        list(map(lambda i: print(f'greedy token for position {i} in first batch item: {tokenizer.decode([greedy_token[0, i].item()])}'), range(20)))
+        list(map(lambda i: print(f'greedy token for position {i} in first batch item: {tokenizer.decode([greedy_token[1, i].item()])}'), range(20)))

@@ -28,11 +28,8 @@ class ToyTransformer(nn.Module):
 
     def forward(self, input_ids):
         x = self.pos_enc(input_ids, device=input_ids.device)
-        print("After positional encoding shape:", x.shape)
         x = self.token_emb(input_ids) * math.sqrt(self.token_emb.embedding_dim)
-        print("Token embeddings shape:", x.shape)  # Debugging statement
-        
-          # Debugging statement
+
         x = self.encoder(x)
         x = self.lm_head(x)
 
