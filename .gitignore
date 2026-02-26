@@ -206,3 +206,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 mini_whisper/decoder/test_text.txt
+data/

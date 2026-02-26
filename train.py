@@ -3,7 +3,28 @@ import torch
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from transformers import WhisperTokenizer
-
+def validate(model, dataloader, tokenizer, DEVICE):
+    with torch.no_grad():
+        for i, batch in list(enumerate(dataloader))[:1]:
+            log_mels = batch['log_mel']  # (B, n_mels, T)
+            log_mels = torch.nan_to_num(log_mels, nan=0.0, posinf=10.0, neginf=-10.0)
+            log_mels = torch.clamp(log_mels, -10, 10)
+            
+            if log_mels.shape != (log_mels.shape[0], 80, 3000):
+                print(f"Skipping bad batch {i} shape {log_mels.shape}")
+                continue
+                
+            inp = log_mels.to(DEVICE)
+            targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
+            targets = targets_cpu.to(DEVICE, non_blocking=True)
+            
+            output = model(inp, targets)
+            print(output.shape, output[0])
+            target_texts = [x+'\n' for x in batch['transcript']]
+            print(f"Target: {target_texts}")
+            # print(f"Output: {output_text}")
+        
+        
 def train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE, epochs=1):
     for epoch in range(epochs):
         for i, batch in enumerate(dataloader):
@@ -130,5 +151,8 @@ def load_model(split="dev-clean", BATCH_SIZE=16, N_MELS=80, D_MODEL=128, N_HEADS
     
 if __name__ == "__main__":
     model, dataloader, loss_fn, optimizer, tokenizer, DEVICE = load_model(split='train-clean-100')
-    #model.load_state_dict(torch.load("model_2026-02-23_20-33-59_0.pth"))
-    train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE)
+    # val_dataloader = load_libriSpeech(split='dev-clean', batch_size=dataloader.batch_size, n_mel_bins=dataloader.n_mel_bins)
+    print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
+    # model.load_state_dict(torch.load("model_2026-02-24_09-54-38_0.pth"))
+    # validate(model, val_dataloader, tokenizer, DEVICE)
+    #train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE)
