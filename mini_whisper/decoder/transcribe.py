@@ -12,10 +12,11 @@ def transcribe(model, audio, **kwargs):
         audio (_type_): Mel spectrogram
     """
     tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base") # Have this as an input
-    SOS = tokenizer.encode('') # Start of sentence
+    SOS = tokenizer.encode('') # Start of sentence (<SOS><TRANSCRIBE><EOS>)
     EOS = SOS[-1]
 
     decoder_input = torch.tensor(SOS[:-1])
+    encoder_output = model.encoder(audio)
     max_length = 100
     for step in range(max_length):
         logits = model.decoder(decoder_input, encoder_output)

@@ -151,7 +151,7 @@ def load_model(split="dev-clean", BATCH_SIZE=16, N_MELS=80, D_MODEL=128, N_HEADS
     
 if __name__ == "__main__":
     model, train_dataloader, loss_fn, optimizer, tokenizer, DEVICE = load_model(split='dev-clean')
-    model.load_state_dict(torch.load("model_2026-02-24_09-54-38_0.pth"))
+    model.load_state_dict(torch.load("model_2026-02-24_09-54-38_0.pth", map_location=DEVICE))
     val_dataloader = load_libriSpeech('dev-clean', batch_size=1, n_mel_bins=model.n_mel_bins)
     validate(model, val_dataloader, tokenizer, DEVICE)
     #train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE)
