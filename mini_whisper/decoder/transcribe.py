@@ -11,7 +11,7 @@ def transcribe(model, audio, **kwargs):
         model (_type_): Mini_whisper model
         audio (_type_): Mel spectrogram
     """
-    tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base") # Have this an an input
+    tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base") # Have this as an input
     SOS = tokenizer.encode('') # Start of sentence
     EOS = SOS[-1]
 
