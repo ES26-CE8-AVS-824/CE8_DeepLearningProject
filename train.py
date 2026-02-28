@@ -3,6 +3,7 @@ import torch
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
+from eval.wer import jiwer_wer
 from transformers import WhisperTokenizer
 def validate(model, dataloader, tokenizer, DEVICE):
     with torch.no_grad():
@@ -19,10 +20,9 @@ def validate(model, dataloader, tokenizer, DEVICE):
             targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
             targets = targets_cpu.to(DEVICE, non_blocking=True)
             
-            output = transcribe.transcribe(model, inp)
-            print(output.shape, output[0])
-            target_texts = [x+'\n' for x in batch['transcript']]
-            # print(f"Output: {output_text}")
+            output = transcribe.transcribe(model, inp, tokenizer, DEVICE)
+            score = jiwer_wer(batch['transcript'][0], tokenizer.decode(output)[0])
+            print(score)
         
         
 def train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE, epochs=1):
@@ -47,7 +47,7 @@ def train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE, epochs=1):
             
             loss.backward()
             optimizer.step()
-                
+            
             
             if i % 10 == 0:
                 print(f'Batch {i}, Loss: {loss.item():.4f}')
@@ -96,7 +96,7 @@ def load_libriSpeech(split,
     print(f"Batch size: {batch_size}")
     return dataloader
 
-def load_model(split="dev-clean", BATCH_SIZE=16, N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448):
+def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448):
     """
     Loads a MiniWhisper model with the specified hyperparameters.
 
@@ -126,8 +126,6 @@ def load_model(split="dev-clean", BATCH_SIZE=16, N_MELS=80, D_MODEL=128, N_HEADS
     print("=" * 60)
     print("Mini-Whisper Training - Data Loading & Preprocessing")
     print("=" * 60)
-
-    dataloader = load_libriSpeech(split, batch_size=BATCH_SIZE, n_mel_bins=N_MELS)
     
     print(f'\nLoading tokenizer...')
     tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base")
@@ -146,11 +144,13 @@ def load_model(split="dev-clean", BATCH_SIZE=16, N_MELS=80, D_MODEL=128, N_HEADS
     loss_fn = torch.nn.CrossEntropyLoss().to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     
-    return model, dataloader, loss_fn, optimizer, tokenizer, DEVICE
+    return model, loss_fn, optimizer, tokenizer, DEVICE
     
     
 if __name__ == "__main__":
-    model, train_dataloader, loss_fn, optimizer, tokenizer, DEVICE = load_model(split='dev-clean')
+    model, loss_fn, optimizer, tokenizer, DEVICE = load_model()
+    # train_dataloader = load_libriSpeech('train-clean-100', batch_size=16, n_mel_bins=model.n_mel_bins)
+
     model.load_state_dict(torch.load("model_2026-02-24_09-54-38_0.pth", map_location=DEVICE))
     val_dataloader = load_libriSpeech('dev-clean', batch_size=1, n_mel_bins=model.n_mel_bins)
     validate(model, val_dataloader, tokenizer, DEVICE)

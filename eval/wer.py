@@ -56,7 +56,7 @@ Normalizer = jiwer.Compose(
 
 
 def jiwer_wer(ref: str, hypo: str, normalize: bool = True) -> float:
-
+    print(ref, hypo)
     wer = jiwer.wer(
         ref,
         hypo,
