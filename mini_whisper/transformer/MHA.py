@@ -50,13 +50,13 @@ class MultiHeadAttention(nn.Module):
         return out, qk
     
 class TransformerBlock(nn.Module):
-    def __init__(self, d_model: int, n_head: int, cross_attention: bool=False, dropout: float=0.0):
+    def __init__(self, d_model: int, n_head: int, cross_attention_bool: bool=False, dropout: float=0.0):
         super().__init__()
         self.attn = MultiHeadAttention(d_model, n_head)
         self.attn_ln = nn.LayerNorm(d_model)
         
-        self.cross_attention = MultiHeadAttention(d_model, n_head) if cross_attention else None
-        self.cross_attention_ln = nn.LayerNorm(d_model) if cross_attention else None
+        self.cross_attention = MultiHeadAttention(d_model, n_head) if cross_attention_bool else None
+        self.cross_attention_ln = nn.LayerNorm(d_model) if cross_attention_bool else None
         
         n_mlp = d_model * 4  # In whisper at least, the feedforward network has an inner dimension 4 times the model dimension
         self.ff = nn.Sequential(
@@ -69,7 +69,7 @@ class TransformerBlock(nn.Module):
         
     def forward(self, x: Tensor, cross_x: Tensor=None, mask: Tensor=None):
         x = x  + self.attn(self.attn_ln(x), mask=mask)[0] # Self-attention with residual connection
-        if self.cross_attention is not None and cross_x is not None:
-            x = x + self.cross_attention(self.cross_attention_ln(x), cross_x=cross_x, mask=mask)[0] # Cross-attention with residual connection
+        if self.cross_attention is not None:
+            x = x + self.cross_attention(self.cross_attention_ln(x), cross_x=cross_x)[0] # Cross-attention with residual connection
         x = x + self.ff(self.ff_ln(x)) # Feedforward network with residual connection
         return x

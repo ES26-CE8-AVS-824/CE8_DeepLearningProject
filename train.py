@@ -17,12 +17,12 @@ def validate(model, dataloader, tokenizer, device, num_batches=None):
                 break
 
             log_mels = batch['log_mel']
-            log_mels = torch.nan_to_num(log_mels, nan=0.0, posinf=10.0, neginf=-10.0)
-            log_mels = torch.clamp(log_mels, -10, 10)
+            # log_mels = torch.nan_to_num(log_mels, nan=0.0, posinf=10.0, neginf=-10.0)
+            # log_mels = torch.clamp(log_mels, -10, 10)
 
-            if log_mels.shape[1:] != (80, 3000):
-                print(f"Skipping batch {i}: unexpected shape {log_mels.shape}")
-                continue
+            # if log_mels.shape[1:] != (80, 3000):
+            #     print(f"Skipping batch {i}: unexpected shape {log_mels.shape}")
+            #     continue
 
             inp = log_mels.to(device)
             targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
@@ -57,17 +57,21 @@ def train(model, dataloader, optimizer, loss_fn, tokenizer, DEVICE, epochs=1):
 
             targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
             targets = targets_cpu.to(DEVICE, non_blocking=True)
-
+            
             optimizer.zero_grad()
-            outputs = model(log_mels, targets)
-            loss = loss_fn(outputs.view(-1, outputs.size(-1)), targets.view(-1))
+            tgt_in  = targets[:, :-1]
+            tgt_out = targets[:, 1:]
 
+            outputs = model(log_mels, tgt_in)
+            loss = loss_fn(outputs.reshape(-1, outputs.size(-1)),
+               tgt_out.reshape(-1))
+                        
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             if i % 100 == 0:
-                print(f'Epoch {epoch + 1}, Batch {i}, Loss: {loss.item():.4f}')
+                print(f'Epoch {epoch + 1}, Batch {i}, Loss: {float(loss.item())}')
 
             del log_mels, targets, outputs
             torch.cuda.memory.empty_cache()
@@ -177,7 +181,7 @@ def main(mode: str = "eval"):
     model, loss_fn, optimizer, tokenizer, DEVICE = load_model()
 
     if mode == "train":
-        train_dataloader = load_libriSpeech('train-clean-100', batch_size=32, n_mel_bins=model.n_mel_bins)
+        train_dataloader = load_libriSpeech('train-clean-100', batch_size=16, n_mel_bins=model.n_mel_bins)
         train(model, train_dataloader, optimizer, loss_fn, tokenizer, DEVICE, 20)
     elif mode == "eval":
         model.load_state_dict(torch.load("ckpts/model_2026-03-11_16-21_epoch-19.pth", map_location=DEVICE))
