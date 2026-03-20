@@ -13,9 +13,10 @@ CONFIG = {
     "batch_size": 16,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     "num_files": 28539,
-    "max_len": 448
+    "max_len": 448,
     "adam_init_lr": 3e-4,
-    "adam_betas": (0.9, 0.98)
+    "adam_betas": (0.9, 0.98),
+    "n_mel_bins": 80,
 }
 
 # Hardcoded for now but TODO remove this as a global

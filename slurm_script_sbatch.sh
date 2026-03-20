@@ -10,6 +10,9 @@
 
 singularity exec --nv \
     -B "$HOME/.singularity:/scratch/singularity" \
+    --env WANDB_API_KEY="[wandb-api-key]" \
+    --env WANDB_ENTITY="mini-whisper" \
+    --env WANDB_PROJECT="mini-whisper" \
     "/ceph/project/es26-ce8-avs-824/whispers-in-the-storm/sgmse_env_cu130_v1.sif" \
     /bin/bash -c "
         set -euo pipefail
