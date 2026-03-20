@@ -1,18 +1,27 @@
 import datetime
 import torch
+import wandb
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
 from eval.wer import jiwer_wer
 from transformers import WhisperTokenizer
 
-# where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
-BATCH_SIZE = 16
-EPOCHS = 10
-NUM_FILES = 28539
-NUM_WARMUP_STEPS = NUM_FILES*EPOCHS // BATCH_SIZE # Default for now TODO remove this as a global
+CONFIG = {
+    "total_epochs": 20,
+    "warmup_epochs": 10,
+    "batch_size": 16,
+    # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
+    "num_files": 28539,
+    "max_len": 448
+    "adam_init_lr": 3e-4,
+    "adam_betas": (0.9, 0.98)
+}
 
-def validate(model, dataloader, tokenizer, device, num_batches=None):
+# Hardcoded for now but TODO remove this as a global
+CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
+
+def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None):
     model.eval()
     total_wer, total_examples = 0.0, 0
 
@@ -30,8 +39,8 @@ def validate(model, dataloader, tokenizer, device, num_batches=None):
             #     continue
 
             inp = log_mels.to(device)
-            targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
-            targets = targets_cpu.to(device, non_blocking=True)
+            # targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
+            # targets = targets_cpu.to(device, non_blocking=True)
 
             outputs = transcribe.transcribe(model, inp, tokenizer, device)
             decoded = tokenizer.decode(outputs)
@@ -44,11 +53,23 @@ def validate(model, dataloader, tokenizer, device, num_batches=None):
 
     mean_wer = total_wer / total_examples if total_examples > 0 else float('nan')
     print(f"\nValidation WER: {mean_wer:.4f} over {total_examples} examples")
+
+    # Log a scalar per validation run / epoch
+    wandb.log(
+        {
+            "val/wer": mean_wer,
+            "val/num_examples": total_examples,
+            "val/epoch": epoch,
+        }
+    )
+
     return mean_wer
 
 
 def train(model, dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1):
+    global_step = 0
     for epoch in range(epochs):
+        model.train()
         for i, batch in enumerate(dataloader):
             log_mels = batch['log_mel']  # (B, n_mels, T)
             # log_mels = torch.nan_to_num(log_mels, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -64,16 +85,25 @@ def train(model, dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, e
             targets = targets_cpu.to(DEVICE, non_blocking=True)
             
             optimizer.zero_grad()
-            tgt_in  = targets[:, :-1]
+            tgt_in = targets[:, :-1]
             tgt_out = targets[:, 1:]
 
             outputs = model(log_mels, tgt_in)
             loss = loss_fn(outputs.reshape(-1, outputs.size(-1)),
-               tgt_out.reshape(-1))
-                        
+                           tgt_out.reshape(-1))
+
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+
+            wandb.log(
+                {
+                    "train/loss": loss.item(),
+                    "train/epoch": epoch
+                },
+                step=global_step,
+            )
+            global_step += 1
 
             if i % 100 == 0:
                 print(f'Epoch {epoch + 1}, Batch {i}, Loss: {float(loss.item())}')
@@ -83,12 +113,14 @@ def train(model, dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, e
             scheduler.step()
 
         # Save the model with name date and epoch count
-        torch.save(model.state_dict(),
-                   f"ckpts/model_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M')}_epoch-{epoch}.pth")
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+        model_name = f"ckpts/model_{ts}_epoch-{epoch + 1}.pth"
+        torch.save(model.state_dict(), model_name)
+        wandb.save(model_name)
 
 
 def convert_transcripts_to_targets(transcripts, tokenizer):
-    max_len = 448
+    max_len = CONFIG["max_len"]
     BATCH_SIZE = len(transcripts)
 
     prefix = [
@@ -114,7 +146,7 @@ def load_libriSpeech(split,
                      shuffle=True,
                      num_workers=4,
                      n_mel_bins=80,
-                     ):
+                     ) -> LibriSpeechAudioPreprocessingDataLoader:
     DATA_DIR = "./data"
     FOLDER_IN_ARCHIVE = "LibriSpeech"
     dataloader = LibriSpeechAudioPreprocessingDataLoader(
@@ -134,9 +166,9 @@ def load_libriSpeech(split,
 
 def linear_warmup_lambda(current_step: int):
 # current_step starts at 0
-    if current_step >= NUM_WARMUP_STEPS:
+    if current_step >= CONFIG["num_warmup_steps"]:
         return 1.0  # stay at peak_lr
-    return float(current_step + 1) / float(max(1, NUM_WARMUP_STEPS))
+    return float(current_step + 1) / float(max(1, CONFIG["num_warmup_steps"]))
 
 def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwargs={}):
     """
@@ -181,11 +213,11 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
         n_heads=N_HEADS,
         max_text_len=MAX_TEXT_LEN
     ).to(DEVICE)
-    
-    #For warmup actually the peak lr, can be used for annealing as a base also
-    adam_init_lr = 1e-4 if kwargs.get("adam_init_lr") is None else kwargs["adam_init_lr"] 
+
+    # For warmup actually the peak lr, can be used for annealing as a base also
+    adam_init_lr = 1e-4 if kwargs.get("adam_init_lr") is None else kwargs["adam_init_lr"]
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id).to(DEVICE)
-    optimizer = torch.optim.Adam(model.parameters(), lr=adam_init_lr, betas=(0.9, 0.98), eps=1e-9)
+    optimizer = torch.optim.Adam(model.parameters(), lr=adam_init_lr, betas=CONFIG["adam_betas"], eps=1e-9)
 
     if kwargs.get("warmup") is not None:
         scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -195,7 +227,7 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
     else:
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=EPOCHS*NUM_FILES//BATCH_SIZE,
+            T_max=CONFIG["num_warmup_steps"],
             eta_min=adam_init_lr*0.1 #10% of initial lr
         )
 
@@ -204,15 +236,31 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
 
 
 def main(mode: str = "eval"):
-    model, loss_fn, optimizer, scheduler, tokenizer, DEVICE = load_model(kwargs={"warmup": True, "adam_init_lr": 3e-4})
+    model, loss_fn, optimizer, scheduler, tokenizer, DEVICE = load_model(kwargs={"warmup": True, "adam_init_lr": CONFIG["adam_init_lr"]})
+
+    run = wandb.init(
+        project="mini-whisper",
+        entity="mini-whisper",
+        config=CONFIG,
+        name=f"mini-whisper-{mode}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
+    )
+
+    run.watch(model, log="all", log_freq=100)
 
     if mode == "train":
-        train_dataloader = load_libriSpeech('train-clean-100', batch_size=BATCH_SIZE, n_mel_bins=model.n_mel_bins)
-        train(model, train_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, EPOCHS)
+
+        train_dataloader = load_libriSpeech('train-clean-100',
+                                            batch_size=CONFIG["batch_size"],
+                                            n_mel_bins=CONFIG["n_mel_bins"])
+
+        train(model, train_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=CONFIG["total_epochs"])
     elif mode == "eval":
-        model.load_state_dict(torch.load("ckpts/model_2026-03-11_16-21_epoch-19.pth", map_location=DEVICE))
-        val_dataloader = load_libriSpeech('test-clean', batch_size=1, n_mel_bins=model.n_mel_bins)
+        ckpt_path = "ckpts/model_2026-03-18"
+        state = torch.load(ckpt_path, map_location=DEVICE)
+        model.load_state_dict(state)
+        val_dataloader = load_libriSpeech('test-clean', batch_size=1, n_mel_bins=CONFIG["n_mel_bins"])
         validate(model, val_dataloader, tokenizer, DEVICE)
+    run.finish()
 
 
 if __name__ == "__main__":

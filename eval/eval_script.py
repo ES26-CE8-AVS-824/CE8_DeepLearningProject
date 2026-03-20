@@ -1,7 +1,7 @@
 from wer import jiwer_wer
 from encoder.audioEncoder import AudioEncoder
 
-class Evalute():
+class Evaluate():
     def __init__(self, model, tokenizer, dataloader):
         self.model = model
         self.tokenizer = tokenizer
@@ -10,7 +10,7 @@ class Evalute():
     def evaluate(self, audio_input):
         WERs = []
         for batch in self.dataloader:
-            audio_input = self.AUdioEncoder(batch['audio'])
+            audio_input = self.AudioEncoder(batch['audio'])
             original_transcriptions = batch['transcription']
             output = self.model(audio_input)
             output_transcriptions = self.postprocess_output(output)
