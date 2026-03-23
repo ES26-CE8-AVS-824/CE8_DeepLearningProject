@@ -22,7 +22,7 @@ CONFIG = {
 # Hardcoded for now but TODO remove this as a global
 CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
 
-def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None):
+def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None, step=None):
     model.eval()
     total_wer, total_examples = 0.0, 0
 
@@ -61,13 +61,14 @@ def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None)
             "val/wer": mean_wer,
             "val/num_examples": total_examples,
             "val/epoch": epoch,
-        }
+        },
+        step=step,
     )
 
     return mean_wer
 
 
-def train(model, dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1):
+def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1):
     global_step = 0
     for epoch in range(epochs):
         model.train()
@@ -112,6 +113,11 @@ def train(model, dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, e
             del log_mels, targets, outputs
             torch.cuda.memory.empty_cache()
             scheduler.step()
+
+        # Run validation and log at the same global_step
+        if val_dataloader is not None:
+            validate(model, val_dataloader, tokenizer, DEVICE, epoch=epoch, step=global_step)
+            model.train()
 
         # Save the model with name date and epoch count
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
@@ -249,12 +255,12 @@ def main(mode: str = "eval"):
     run.watch(model, log="all", log_freq=100)
 
     if mode == "train":
-
         train_dataloader = load_libriSpeech('train-clean-100',
                                             batch_size=CONFIG["batch_size"],
                                             n_mel_bins=CONFIG["n_mel_bins"])
-
-        train(model, train_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=CONFIG["total_epochs"])
+        val_dataloader = load_libriSpeech('test-clean', batch_size=1,
+                                          n_mel_bins=CONFIG["n_mel_bins"])
+        train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=CONFIG["total_epochs"])
     elif mode == "eval":
         ckpt_path = "ckpts/model_2026-03-18"
         state = torch.load(ckpt_path, map_location=DEVICE)
