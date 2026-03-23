@@ -5,22 +5,25 @@ from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
 from eval.wer import jiwer_wer
-from transformers import WhisperTokenizer
+from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
     "total_epochs": 20,
     "warmup_epochs": 10,
     "batch_size": 16,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
+    # Hardcoded for now but TODO remove this as a global
     "num_files": 28539,
     "max_len": 448,
     "adam_init_lr": 3e-4,
     "adam_betas": (0.9, 0.98),
     "n_mel_bins": 80,
+    "num_workers_dataloader": 8,
+    "d_model": 256
 }
 
-# Hardcoded for now but TODO remove this as a global
 CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
+CONFIG["num_training_steps"] = CONFIG["total_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
 
 def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None, step=None):
     model.eval()
@@ -111,7 +114,7 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                 print(f'Epoch {epoch + 1}, Batch {i}, Loss: {float(loss.item())}')
 
             del log_mels, targets, outputs
-            torch.cuda.memory.empty_cache()
+            # torch.cuda.memory.empty_cache()
             scheduler.step()
 
         # Run validation and log at the same global_step
@@ -171,11 +174,25 @@ def load_libriSpeech(split,
     print(f"Batch size: {batch_size}")
     return dataloader
 
-def linear_warmup_lambda(current_step: int):
-# current_step starts at 0
-    if current_step >= CONFIG["num_warmup_steps"]:
-        return 1.0  # stay at peak_lr
-    return float(current_step + 1) / float(max(1, CONFIG["num_warmup_steps"]))
+# def linear_warmup_lambda(current_step: int):
+# # current_step starts at 0
+#     if current_step >= CONFIG["num_warmup_steps"]:
+#         return 1.0  # stay at peak_lr
+#     return float(current_step + 1) / float(max(1, CONFIG["num_warmup_steps"]))
+
+
+# def warmup_cosine_lambda(current_step: int) -> float:
+#     n_warmup = CONFIG["num_warmup_steps"]  # 17,836
+#     n_total = CONFIG["num_training_steps"]  # 35,673
+#     eta_min_ratio = 0.1  # decay to 10% of peak LR
+#
+#     if current_step < n_warmup:
+#         return (current_step + 1) / n_warmup
+#
+#     # Cosine decay from peak down to eta_min_ratio * peak
+#     progress = (current_step - n_warmup) / (n_total - n_warmup)  # 0 → 1
+#     cosine = 0.5 * (1 + math.cos(math.pi * progress))  # 1 → 0
+#     return eta_min_ratio + (1 - eta_min_ratio) * cosine
 
 def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwargs={}):
     """
@@ -226,24 +243,32 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
     loss_fn = torch.nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=adam_init_lr, betas=CONFIG["adam_betas"], eps=1e-9)
 
-    if kwargs.get("warmup") is not None:
-        scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optimizer,
-        lr_lambda=linear_warmup_lambda
-        )
-    else:
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=CONFIG["num_warmup_steps"],
-            eta_min=adam_init_lr*0.1 #10% of initial lr
-        )
+    # scheduler = torch.optim.lr_scheduler.LambdaLR(
+    #     optimizer,
+    #     lr_lambda=warmup_cosine_lambda
+    # )
 
+    # https://github.com/huggingface/transformers/blob/e5ad3946209fb96db5e9965b3eb67d69cc3749e0/src/transformers/optimization.py#L389
+    scheduler = get_cosine_with_min_lr_schedule_with_warmup_lr_rate(
+        optimizer,
+        num_warmup_steps=CONFIG["num_warmup_steps"],
+        num_training_steps=CONFIG["num_training_steps"],
+        num_cycles=0.5,          # single half‑cosine
+        min_lr_rate=0.1,         # decay to 10% of initial lr (= eta_min_ratio)
+        warmup_lr_rate=None,     # initial lr: NOne to start at (step+1)/num_warmup_steps
+    )
 
     return model, loss_fn, optimizer, scheduler, tokenizer, DEVICE
 
 
 def main(mode: str = "eval"):
-    model, loss_fn, optimizer, scheduler, tokenizer, DEVICE = load_model(kwargs={"warmup": True, "adam_init_lr": CONFIG["adam_init_lr"]})
+    model, loss_fn, optimizer, scheduler, tokenizer, DEVICE = load_model(
+        D_MODEL=CONFIG["d_model"],
+        kwargs={
+            "warmup": True,
+            "adam_init_lr": CONFIG["adam_init_lr"]
+        }
+    )
 
     run = wandb.init(
         project="mini-whisper",
@@ -257,15 +282,18 @@ def main(mode: str = "eval"):
     if mode == "train":
         train_dataloader = load_libriSpeech('train-clean-100',
                                             batch_size=CONFIG["batch_size"],
-                                            n_mel_bins=CONFIG["n_mel_bins"])
+                                            n_mel_bins=CONFIG["n_mel_bins"],
+                                            num_workers=CONFIG["num_workers_dataloader"])
         val_dataloader = load_libriSpeech('test-clean', batch_size=1,
-                                          n_mel_bins=CONFIG["n_mel_bins"])
+                                          n_mel_bins=CONFIG["n_mel_bins"],
+                                          num_workers=CONFIG["num_workers_dataloader"])
         train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=CONFIG["total_epochs"])
     elif mode == "eval":
         ckpt_path = "ckpts/model_2026-03-18"
         state = torch.load(ckpt_path, map_location=DEVICE)
         model.load_state_dict(state)
-        val_dataloader = load_libriSpeech('test-clean', batch_size=1, n_mel_bins=CONFIG["n_mel_bins"])
+        val_dataloader = load_libriSpeech('test-clean', batch_size=1, n_mel_bins=CONFIG["n_mel_bins"],
+                                          num_workers=CONFIG["num_workers_dataloader"])
         validate(model, val_dataloader, tokenizer, DEVICE)
     run.finish()
 
