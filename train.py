@@ -270,6 +270,8 @@ def main(mode: str = "eval"):
         }
     )
 
+    print_param_breakdown(model)
+
     run = wandb.init(
         project="mini-whisper",
         entity="mini-whisper",
@@ -289,7 +291,7 @@ def main(mode: str = "eval"):
                                           num_workers=CONFIG["num_workers_dataloader"])
         train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=CONFIG["total_epochs"])
     elif mode == "eval":
-        ckpt_path = "ckpts/model_2026-03-18"
+        ckpt_path = "ckpts/model_2026-03-24_04-23_epoch-19.pth"
         state = torch.load(ckpt_path, map_location=DEVICE)
         model.load_state_dict(state)
         val_dataloader = load_libriSpeech('test-clean', batch_size=1, n_mel_bins=CONFIG["n_mel_bins"],

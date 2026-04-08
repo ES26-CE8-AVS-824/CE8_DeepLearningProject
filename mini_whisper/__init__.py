@@ -64,6 +64,13 @@ from .model import (
     MiniWhisper,
 )
 
+# Util
+from .util import (
+    count_parameters,
+    parameter_breakdown,
+    print_param_breakdown
+)
+
 # Define what gets imported with "from mini_whisper import *"
 __all__ = [
     # Audio processing
@@ -92,6 +99,10 @@ __all__ = [
     "SimpleTransformerBlock",
     # Complete model
     "MiniWhisper",
+    # Util
+    "count_parameters",
+    "parameter_breakdown",
+    "print_param_breakdown"
 ]
 
 

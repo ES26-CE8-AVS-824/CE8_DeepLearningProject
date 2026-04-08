@@ -5,7 +5,6 @@ from torch import nn
 import torch
 import numpy as np
 
-from mini_whisper.transformer.MHA_simple import SimpleTransformerBlock
 
 class TextDecoder(nn.Module):
     def __init__(self, vocab_size: int, d_model: int, max_len: int, n_layers: int, n_heads: int):
@@ -19,7 +18,7 @@ class TextDecoder(nn.Module):
         self.register_buffer("mask", mask, persistent=False)
 
     def forward(self, x: Tensor, cross_x: Tensor):
-        x = self.token_emb(x) + self.pos_enc(x)[0:0+x.shape[-1]] 
+        x = self.token_emb(x) + self.pos_enc(x)  # [0:0+x.shape[-1]]
         x = x.to(cross_x.dtype)
         for block in self.blocks:
             x = block(x, cross_x=cross_x, mask=self.mask)  # Use cross-attention, take only the output (not qk)

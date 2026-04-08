@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from mini_whisper.encoder.audioEncoder import AudioEncoder
 from mini_whisper.decoder.textDecoder import TextDecoder
-
+from mini_whisper import util
 
 
 class MiniWhisper(nn.Module):
@@ -112,7 +112,7 @@ class MiniWhisper(nn.Module):
 
 if __name__ == "__main__":
     # Test the model
-    batch_size = 4
+    batch_size = 32
     n_mels = 80
     time_frames = 3000
     seq_len = 20
@@ -138,4 +138,7 @@ if __name__ == "__main__":
     print(f"Input tokens shape: {tokens.shape}")
     print(f"Output logits shape: {logits.shape}")
     print(f"\nModel parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    print(f"\nParameter breakdown:\n{util.parameter_breakdown(model)}\n")
+    util.print_param_breakdown(model)
 
