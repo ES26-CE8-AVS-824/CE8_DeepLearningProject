@@ -1,8 +1,9 @@
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 
 import torch
 import torchaudio
 from torch.utils.data import DataLoader, Dataset
+from torch.utils.data.distributed import DistributedSampler
 from torchaudio.datasets import LIBRISPEECH
 
 from mini_whisper import N_MEL_BINS
@@ -31,9 +32,12 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
             download_dataset: bool = True,
             batch_size: int = 16,
             shuffle: bool = True,
+            sampler: Union[None, DistributedSampler] = None,
             num_workers: int = 2,
             target_sr: int = SAMPLE_RATE,
             n_mel_bins: int = N_MEL_BINS,
+            rank: int = 0,
+            world_size: int = 1,
             **kwargs
     ):
         """
@@ -64,10 +68,15 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
             download=download_dataset,
         )
 
+        assert sampler is None or not shuffle, "Cannot use shuffle=True with an explicit sampler — sampler controls ordering"
+        if sampler is not None:
+            sampler = sampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+
         super().__init__(
             dataset=dataset,
             batch_size=batch_size,
             shuffle=shuffle,
+            sampler=sampler,
             num_workers=num_workers,
             collate_fn=self._collate_and_preprocess,
             pin_memory=True,

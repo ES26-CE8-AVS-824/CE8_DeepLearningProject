@@ -1,20 +1,25 @@
 import datetime
+import os
 import torch
+import torch.distributed as dist
+
 import wandb
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
 from eval.wer import jiwer_wer
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
-    "total_epochs": 20,
-    "warmup_epochs": 10,
+    "total_epochs": 50,
+    "warmup_epochs": 20,
     "batch_size": 16,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
     "num_files": 28539,
-    "max_len": 448,
+    "max_len": 224,
     "adam_init_lr": 3e-4,
     "adam_betas": (0.9, 0.98),
     "n_mel_bins": 80,
@@ -25,9 +30,10 @@ CONFIG = {
 CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
 CONFIG["num_training_steps"] = CONFIG["total_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
 
-def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None, step=None):
+def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None, step=None, is_main=True):
     model.eval()
     total_wer, total_examples = 0.0, 0
+    val_loss = 0.0
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -35,46 +41,51 @@ def validate(model, dataloader, tokenizer, device, num_batches=None, epoch=None,
                 break
 
             log_mels = batch['log_mel']
-            # log_mels = torch.nan_to_num(log_mels, nan=0.0, posinf=10.0, neginf=-10.0)
-            # log_mels = torch.clamp(log_mels, -10, 10)
-
-            # if log_mels.shape[1:] != (80, 3000):
-            #     print(f"Skipping batch {i}: unexpected shape {log_mels.shape}")
-            #     continue
-
             inp = log_mels.to(device)
-            # targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
-            # targets = targets_cpu.to(device, non_blocking=True)
+            
+            with torch.nograd():
+                tgt_in = targets[:, :-1]
+                tgt_out = targets[:, 1:]
 
-            outputs = transcribe.transcribe(model, inp, tokenizer, device)
-            decoded = tokenizer.decode(outputs)
+                outputs = model(log_mels, tgt_in)
+                loss = loss_fn(outputs.reshape(-1, outputs.size(-1)),
+                            tgt_out.reshape(-1))
+                val_loss += loss.item()
 
-            for ref, hyp in zip(batch['transcript'], decoded):
-                wer = jiwer_wer(ref, hyp)
-                total_wer += wer
-                total_examples += 1
-                print(f"[{total_examples}] WER: {wer:.4f}\n  REF: {ref}\n  HYP: {hyp}")
+            for item in batch:
+                inp = item['log_mel']
+                text_outputs = transcribe.transcribe(model, inp, tokenizer, device)
+                decoded = tokenizer.decode(text_outputs)
+
+                for ref, hyp in zip(batch['transcript'], decoded):
+                    wer = jiwer_wer(ref, hyp)
+                    total_wer += wer
+                    total_examples += 1
+                    print(f"[{total_examples}] WER: {wer:.4f}\n  REF: {ref}\n  HYP: {hyp}")
 
     mean_wer = total_wer / total_examples if total_examples > 0 else float('nan')
     print(f"\nValidation WER: {mean_wer:.4f} over {total_examples} examples")
 
     # Log a scalar per validation run / epoch
-    wandb.log(
-        {
-            "val/wer": mean_wer,
-            "val/num_examples": total_examples,
-            "val/epoch": epoch,
-        },
-        step=step,
-    )
+    if is_main and wandb.run is not None:
+        wandb.log(
+            {
+                "val/wer": mean_wer,
+                "val/num_examples": total_examples,
+                "val/epoch": epoch,
+            },
+            step=step,
+        )
 
     return mean_wer
 
 
-def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1):
+def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1, is_main=True):
     global_step = 0
     for epoch in range(epochs):
         model.train()
+        if isinstance(dataloader.sampler, DistributedSampler):
+            dataloader.sampler.set_epoch(epoch)
         for i, batch in enumerate(dataloader):
             log_mels = batch['log_mel']  # (B, n_mels, T)
             # log_mels = torch.nan_to_num(log_mels, nan=0.0, posinf=10.0, neginf=-10.0)
@@ -101,13 +112,14 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
-            wandb.log(
-                {
-                    "train/loss": loss.item(),
-                    "train/epoch": epoch
-                },
-                step=global_step,
-            )
+            if is_main and wandb.run is not None:
+                wandb.log(
+                    {
+                        "train/loss": loss.item(),
+                        "train/epoch": epoch
+                    },
+                    step=global_step,
+                )
             global_step += 1
 
             if i % 100 == 0:
@@ -119,26 +131,24 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
 
         # Run validation and log at the same global_step
         if val_dataloader is not None:
-            validate(model, val_dataloader, tokenizer, DEVICE, epoch=epoch, step=global_step)
+            validate(model, val_dataloader, tokenizer, DEVICE, epoch=epoch, step=global_step, is_main=is_main)
             model.train()
 
         # Save the model with name date and epoch count
-        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-        model_name = f"ckpts/model_{ts}_epoch-{epoch + 1}.pth"
-        torch.save(model.state_dict(), model_name)
-        wandb.save(model_name)
+        if is_main:
+            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+            model_name = f"ckpts/model_{ts}_epoch-{epoch + 1}.pth"
+            inner = model.module if hasattr(model, 'module') else model
+            torch.save(inner.state_dict(), model_name)
+            if wandb.run is not None:
+                wandb.save(model_name)
 
 
 def convert_transcripts_to_targets(transcripts, tokenizer):
     max_len = CONFIG["max_len"]
     BATCH_SIZE = len(transcripts)
 
-    prefix = [
-        tokenizer.convert_tokens_to_ids("<|startoftranscript|>"),
-        tokenizer.convert_tokens_to_ids("<|en|>"),
-        tokenizer.convert_tokens_to_ids("<|transcribe|>"),
-        tokenizer.convert_tokens_to_ids("<|notimestamps|>"),
-    ]
+    prefix = tokenizer.encode("")[:-1]  # Remove the EOS token from the prefix
 
     seqs = [prefix + tokenizer.encode(t, add_special_tokens=False) + [tokenizer.eos_token_id] for t in transcripts]
 
@@ -154,8 +164,11 @@ def load_libriSpeech(split,
                      download_dataset=True,
                      batch_size=16,
                      shuffle=True,
+                     sampler=None,
                      num_workers=4,
                      n_mel_bins=80,
+                     rank: int = 0,
+                     world_size: int = 1,
                      ) -> LibriSpeechAudioPreprocessingDataLoader:
     DATA_DIR = "./data"
     FOLDER_IN_ARCHIVE = "LibriSpeech"
@@ -166,8 +179,11 @@ def load_libriSpeech(split,
         download_dataset=download_dataset,
         batch_size=batch_size,
         shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
-        n_mel_bins=n_mel_bins
+        n_mel_bins=n_mel_bins,
+        world_size=world_size,
+        rank=rank,
     )
 
     print(f"\nCreating DataLoader for: {DATA_DIR}")
@@ -194,7 +210,17 @@ def load_libriSpeech(split,
 #     cosine = 0.5 * (1 + math.cos(math.pi * progress))  # 1 → 0
 #     return eta_min_ratio + (1 - eta_min_ratio) * cosine
 
-def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwargs={}):
+def load_model(
+    N_MELS=80,
+    D_MODEL=128,
+    N_HEADS=4,
+    N_LAYERS=4,
+    MAX_LEN=448,
+    local_rank: int = 0,
+    device: str = "cuda",
+    kwargs=None,
+    distributed: bool = True,
+):
     """
     Loads a MiniWhisper model with the specified hyperparameters.
 
@@ -215,7 +241,6 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
         DEVICE (torch.device): The device to use for training.
     """
 
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     N_ENCODER_LAYERS = N_LAYERS
     N_DECODER_LAYERS = N_LAYERS
     MAX_TEXT_LEN = MAX_LEN
@@ -227,20 +252,26 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
     print(f'\nLoading tokenizer...')
     tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base")
 
+    kwargs = kwargs or {}
+
     print(f'\nLoading model...')
     model = MiniWhisper(
-        vocab_size=tokenizer.vocab_size + 1000,
+        vocab_size=len(tokenizer),  # tokenizer.vocab_size + 1000,
         n_mels=N_MELS,
         d_model=D_MODEL,
         n_encoder_layers=N_ENCODER_LAYERS,
         n_decoder_layers=N_DECODER_LAYERS,
         n_heads=N_HEADS,
         max_text_len=MAX_TEXT_LEN
-    ).to(DEVICE)
+    ).to(device)
+
+    if distributed:
+        ddp_device_id = device.index if isinstance(device, torch.device) and device.index is not None else local_rank
+        model = DDP(model, device_ids=[ddp_device_id], output_device=ddp_device_id)
 
     # For warmup actually the peak lr, can be used for annealing as a base also
     adam_init_lr = 1e-4 if kwargs.get("adam_init_lr") is None else kwargs["adam_init_lr"]
-    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id).to(DEVICE)
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=tokenizer.pad_token_id).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=adam_init_lr, betas=CONFIG["adam_betas"], eps=1e-9)
 
     # scheduler = torch.optim.lr_scheduler.LambdaLR(
@@ -258,47 +289,80 @@ def load_model(N_MELS=80, D_MODEL=128, N_HEADS=4, N_LAYERS=4, MAX_LEN=448, kwarg
         warmup_lr_rate=None,     # initial lr: NOne to start at (step+1)/num_warmup_steps
     )
 
-    return model, loss_fn, optimizer, scheduler, tokenizer, DEVICE
+    return model, loss_fn, optimizer, scheduler, tokenizer
 
 
-def main(mode: str = "eval"):
-    model, loss_fn, optimizer, scheduler, tokenizer, DEVICE = load_model(
+def main(mode: str = "eval", distributed: bool = False):
+
+    # DDP init
+    if distributed:
+        local_rank = int(os.environ["LOCAL_RANK"])
+        torch.cuda.set_device(local_rank)
+        dist.init_process_group(backend="nccl")
+        world_size = dist.get_world_size()
+        is_main = (local_rank == 0)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        local_rank = 0
+        world_size = 1
+        is_main = True
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    model, loss_fn, optimizer, scheduler, tokenizer = load_model(
         D_MODEL=CONFIG["d_model"],
+        local_rank=local_rank,
+        device=device,
+        distributed=distributed,
         kwargs={
             "warmup": True,
             "adam_init_lr": CONFIG["adam_init_lr"]
         }
     )
 
-    print_param_breakdown(model)
+    if is_main:
+        print_param_breakdown(model)
 
-    run = wandb.init(
-        project="mini-whisper",
-        entity="mini-whisper",
-        config=CONFIG,
-        name=f"mini-whisper-{mode}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
-    )
+        run = wandb.init(
+            project="mini-whisper",
+            entity="mini-whisper",
+            config=CONFIG,
+            name=f"mini-whisper-{mode}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        )
 
-    run.watch(model, log="all", log_freq=100)
+        run.watch(model, log="all", log_freq=100)
 
     if mode == "train":
         train_dataloader = load_libriSpeech('train-clean-100',
                                             batch_size=CONFIG["batch_size"],
                                             n_mel_bins=CONFIG["n_mel_bins"],
-                                            num_workers=CONFIG["num_workers_dataloader"])
+                                            num_workers=CONFIG["num_workers_dataloader"],
+                                            sampler=DistributedSampler if distributed else None,
+                                            shuffle=False if distributed else True,
+                                            rank=local_rank, world_size=world_size)
         val_dataloader = load_libriSpeech('test-clean', batch_size=1,
                                           n_mel_bins=CONFIG["n_mel_bins"],
-                                          num_workers=CONFIG["num_workers_dataloader"])
-        train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=CONFIG["total_epochs"])
+                                          num_workers=CONFIG["num_workers_dataloader"],
+                                          sampler=DistributedSampler if distributed else None,
+                                          shuffle=False,
+                                          rank=local_rank, world_size=world_size)
+        train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, device, epochs=CONFIG["total_epochs"], is_main=is_main)
     elif mode == "eval":
         ckpt_path = "ckpts/model_2026-03-24_04-23_epoch-19.pth"
-        state = torch.load(ckpt_path, map_location=DEVICE)
+        state = torch.load(ckpt_path, map_location=device)
         model.load_state_dict(state)
-        val_dataloader = load_libriSpeech('test-clean', batch_size=1, n_mel_bins=CONFIG["n_mel_bins"],
-                                          num_workers=CONFIG["num_workers_dataloader"])
-        validate(model, val_dataloader, tokenizer, DEVICE)
-    run.finish()
+        val_dataloader = load_libriSpeech('test-clean',
+                                          batch_size=16,
+                                          n_mel_bins=CONFIG["n_mel_bins"],
+                                          num_workers=CONFIG["num_workers_dataloader"],
+                                          sampler=DistributedSampler if distributed else None,
+                                          shuffle=False if distributed else True,
+                                          rank=local_rank, world_size=world_size)
+        validate(model, val_dataloader, tokenizer, device, is_main=is_main)
+    if distributed and dist.is_initialized():
+        dist.destroy_process_group()
+    if is_main:
+        run.finish()
 
 
 if __name__ == "__main__":
-    main(mode="train")
+    main(mode="train", distributed=True)
