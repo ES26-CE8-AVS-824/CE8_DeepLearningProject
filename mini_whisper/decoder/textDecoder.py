@@ -25,13 +25,13 @@ class TextDecoder(nn.Module):
         x = self.ln(x)
         logits = x @ torch.transpose(self.token_emb.weight.to(x.dtype), 0, 1)
         return logits
-    
+
 if __name__ == "__main__":
     # And now to decode the results
     from mini_whisper.tokenizer.tokenizer import BPE_Tokenizer
     from mini_whisper.decoder.textDecoder import TextDecoder
     from torch.nn import functional as F
-    
+
     BATCH_SIZE = 16
     D_MODEL = 128
     random_seed = 42
