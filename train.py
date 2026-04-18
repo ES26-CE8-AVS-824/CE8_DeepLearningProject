@@ -1,5 +1,6 @@
 import datetime
 import os
+import re
 import torch
 import torch.distributed as dist
 
@@ -7,26 +8,27 @@ import wandb
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
+from mini_whisper.decoder import transcribe_aigen as transcribe_ai
 from eval.wer import jiwer_wer
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
-    "total_epochs": 50,
-    "warmup_epochs": 20,
+    "total_epochs": 200,
+    "warmup_epochs": 30,
     "batch_size": 32,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
     "num_files": 28539,
     "max_len": 224,
-    "adam_init_lr": 3e-4,
-    "adam_betas": (0.9, 0.98),
+    "adam_init_lr": 1e-3,
+    "adam_betas": (0.9, 0.95),
     "n_mel_bins": 80,
     "num_workers_dataloader": 8,
     "d_model": 256,
-    "label_smoothing": 0.1,
-    "adam-w_wait_decay": 0.01,
+    "label_smoothing": 0.33,
+    "adam-w_wait_decay": 0.001,
 }
 
 CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
@@ -36,6 +38,7 @@ CONFIG["num_training_steps"] = CONFIG["total_epochs"] * CONFIG["num_files"] // C
 def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, epoch=None, step=None, is_main=True):
     model.eval()
     total_wer, total_examples = 0.0, 0
+    # sampling_wer = 0.0
     val_loss = 0.0
 
     with torch.no_grad():
@@ -58,19 +61,28 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
             val_loss += loss.item()
 
             raw = model.module if hasattr(model, 'module') else model
-            text_outputs = transcribe.transcribe(raw, inp, tokenizer, device)
-            for txt in text_outputs:
+            text_outputs = transcribe_ai.transcribe(raw, inp, tokenizer, device, max_new_tokens=100, beam_width=5, length_penalty=0.6)
+            # text_outputs_2 = transcribe_ai.transcribe_sampling(raw, inp, tokenizer, device, max_new_tokens=100, temperature=0.8, top_k=None, top_p=0.95)
+            for i, txt in enumerate(text_outputs): #, text_outputs_2)):
+                # for j, txt in enumerate(txts):
                 decoded = tokenizer.decode(txt)
 
-                for ref, hyp in zip(batch['transcript'], decoded):
-                    wer = jiwer_wer(ref, hyp)
-                    total_wer += wer
-                    total_examples += 1
-                    print(f"[{total_examples}] WER: {wer:.4f}\n  REF: {ref}\n  HYP: {hyp}")
+                ref = batch['transcript'][i]
+                wer = jiwer_wer(ref, decoded)
+                # if j == 0:
+                total_wer += wer
+                print(f"[{total_examples}] WER beam: {wer:.2%}\n  REF: {ref}\n  HYP: {decoded}\n")
+                #else:
+                #    sampling_wer += wer
+                #    print(f"[{total_examples}] WER sampled: {wer:.2%}\n  REF: {ref}\n  HYP: {decoded}\n")
+                total_examples += 1
+
 
     mean_wer = total_wer / total_examples if total_examples > 0 else float('nan')
+    # mean_sampling_wer = sampling_wer / total_examples if total_examples > 0 else float('nan')
     mean_val = val_loss / total_examples if total_examples > 0 else float('nan')
-    print(f"\nValidation WER: {mean_wer:.4f} over {total_examples} examples")
+    print(f"\nValidation WER: {mean_wer:.2%} over {total_examples} examples")
+    # print(f"Validation Sampling WER: {mean_sampling_wer:.2%} over {total_examples} examples")
     print(f"Validation Loss: {mean_val:.4f}")
 
     # Log a scalar per validation run / epoch
@@ -78,19 +90,23 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
         wandb.log(
             {
                 "val/wer": mean_wer,
+#               "val/sampling_wer": mean_sampling_wer,
                 "val/num_examples": total_examples,
                 "val/epoch": epoch,
                 "val/loss": mean_val,
+                "val/perplexity": torch.exp(torch.tensor(mean_val))
             },
             step=step,
         )
 
-    return mean_wer
+    return mean_wer #, mean_sampling_wer
 
 
-def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1, is_main=True):
-    global_step = 0
-    for epoch in range(epochs):
+def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1, start_epoch=0, is_main=True):
+    steps_per_epoch = len(dataloader)
+    global_step = start_epoch * steps_per_epoch
+
+    for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
         if isinstance(dataloader.sampler, DistributedSampler):
             dataloader.sampler.set_epoch(epoch)
@@ -110,12 +126,13 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                            tgt_out.reshape(-1))
 
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             if is_main and wandb.run is not None:
                 wandb.log(
                     {
+                        "train/grad_norm": grad_norm,
                         "train/loss": loss.item(),
                         "train/epoch": epoch
                     },
@@ -130,19 +147,20 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             # torch.cuda.memory.empty_cache()
             scheduler.step()
 
-        # Run validation and log at the same global_step
-        if val_dataloader is not None:
-            validate(model, val_dataloader, tokenizer, DEVICE, loss_fn, epoch=epoch, step=global_step, is_main=is_main)
-            model.train()
+        # Run validation and log at the same global_step each 5th epoch
+        if (epoch + 1) % 5 == 0:
+            if val_dataloader is not None:
+                validate(model, val_dataloader, tokenizer, DEVICE, loss_fn, epoch=epoch, step=global_step, is_main=is_main)
+                model.train()
 
-        # Save the model with name date and epoch count
-        if is_main:
-            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
-            model_name = f"ckpts/model_{ts}_epoch-{epoch + 1}.pth"
-            inner = model.module if hasattr(model, 'module') else model
-            torch.save(inner.state_dict(), model_name)
-            if wandb.run is not None:
-                wandb.save(model_name)
+            # Save the model with name date and epoch count
+            if is_main:
+                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
+                model_name = f"ckpts/model_{ts}_epoch-{epoch + 1}.pth"
+                inner = model.module if hasattr(model, 'module') else model
+                torch.save(inner.state_dict(), model_name)
+                if wandb.run is not None:
+                    wandb.save(model_name)
 
 
 def convert_transcripts_to_targets(transcripts, tokenizer):
@@ -258,7 +276,7 @@ def load_model(
 
     print(f'\nLoading model...')
     model = MiniWhisper(
-        vocab_size=tokenizer.vocab_size + 1000,
+        vocab_size=len(tokenizer),  # tokenizer.vocab_size + 1000,
         n_mels=N_MELS,
         d_model=D_MODEL,
         n_encoder_layers=N_ENCODER_LAYERS,
@@ -304,7 +322,8 @@ def load_model(
 
 def main(mode: str = "eval",
          validate_during_training: bool = False,
-         distributed: bool = False
+         distributed: bool = False,
+         load_from_ckpt_path: None | str = None
          ):
     # DDP init
     if distributed:
@@ -332,6 +351,12 @@ def main(mode: str = "eval",
     )
 
     raw = model.module if hasattr(model, 'module') else model
+    start_epoch = 0
+    if load_from_ckpt_path is not None:
+        state = torch.load(load_from_ckpt_path, map_location=device)
+        raw.load_state_dict(state)
+        start_epoch = int(re.search(r"epoch-(\d+)", load_from_ckpt_path).group(1))
+
 
     if is_main:
         print_param_breakdown(raw)
@@ -365,13 +390,10 @@ def main(mode: str = "eval",
             val_dataloader = None
 
         train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, device,
-              epochs=CONFIG["total_epochs"], is_main=is_main)
+              epochs=CONFIG["total_epochs"], start_epoch=start_epoch, is_main=is_main)
 
     elif mode == "eval":
-        ckpt_path = "ckpts/model_2026-03-24_04-23_epoch-19.pth"
-        state = torch.load(ckpt_path, map_location=device)
-        raw.load_state_dict(state)
-        val_dataloader = load_libriSpeech('test-clean',
+        val_dataloader = load_libriSpeech('train-clean-100',
                                           batch_size=16,
                                           n_mel_bins=CONFIG["n_mel_bins"],
                                           num_workers=CONFIG["num_workers_dataloader"],
@@ -386,4 +408,9 @@ def main(mode: str = "eval",
 
 
 if __name__ == "__main__":
-    main(mode="eval", validate_during_training=False, distributed=True)
+    main(
+        mode="train",
+        validate_during_training=True,
+        distributed=True,
+        load_from_ckpt_path="ckpts/model_2026-04-18_11-31_epoch-145.pth"
+    )
