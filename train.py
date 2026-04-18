@@ -9,7 +9,7 @@ from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
 from mini_whisper.decoder import transcribe_aigen as transcribe_ai
-from eval.wer import jiwer_wer
+from eval.wer import jiwer_wer, wer_calc
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
@@ -62,13 +62,14 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
 
             raw = model.module if hasattr(model, 'module') else model
             text_outputs = transcribe_ai.transcribe(raw, inp, tokenizer, device, max_new_tokens=100, beam_width=5, length_penalty=0.6)
+            # text_outputs = transcribe(model, inp, tokenizer, device, beam_size=5, max_length=100)
             # text_outputs_2 = transcribe_ai.transcribe_sampling(raw, inp, tokenizer, device, max_new_tokens=100, temperature=0.8, top_k=None, top_p=0.95)
             for i, txt in enumerate(text_outputs): #, text_outputs_2)):
                 # for j, txt in enumerate(txts):
                 decoded = tokenizer.decode(txt)
 
                 ref = batch['transcript'][i]
-                wer = jiwer_wer(ref, decoded)
+                wer = wer_calc(ref, decoded) #  jiwer_wer(ref, decoded)
                 # if j == 0:
                 total_wer += wer
                 print(f"[{total_examples}] WER beam: {wer:.2%}\n  REF: {ref}\n  HYP: {decoded}\n")
@@ -412,5 +413,5 @@ if __name__ == "__main__":
         mode="train",
         validate_during_training=True,
         distributed=True,
-        load_from_ckpt_path="ckpts/model_2026-04-18_11-31_epoch-145.pth"
+        load_from_ckpt_path="ckpts/model_2026-04-18_11-31_epoch-70.pth"
     )
