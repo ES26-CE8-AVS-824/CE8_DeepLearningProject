@@ -10,7 +10,10 @@ import jiwer
 # https://medium.com/@johnidouglasmarangon/how-to-calculate-the-word-error-rate-in-python-ce0751a46052
 
 
-def wer_calc(ref, hypo):
+def wer_calc(ref, hypo, normalize: bool = True) -> float:
+    if normalize:
+        ref = " ".join(Normalizer(ref)[0])
+        hypo = " ".join(Normalizer(hypo)[0])
     ref_words = ref.split()
     hyp_words = hypo.split()
     n, m = len(ref_words), len(hyp_words)
@@ -60,8 +63,8 @@ def jiwer_wer(ref: str, hypo: str, normalize: bool = True) -> float:
     wer = jiwer.wer(
         ref,
         hypo,
-        reference_transform=Normalizer if normalize else None,
-        hypothesis_transform=Normalizer if normalize else None,
+        reference_transform=Normalizer if normalize else jiwer.transformations.wer_default,
+        hypothesis_transform=Normalizer if normalize else jiwer.transformations.wer_default,
     )
 
     return wer
