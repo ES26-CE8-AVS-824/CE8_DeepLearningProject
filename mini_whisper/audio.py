@@ -89,14 +89,16 @@ def compute_log_mel_spectrogram(
         n_mels=n_mel_bins,
         window_fn=torch.hann_window,
     )
-    T = waveform.shape[1]
-    mel = mel_transform(waveform)                # (1, n_mels, T)
+    T = waveform.shape[1]           # T = 30 * 16000 = 480,000
+    mel = mel_transform(waveform)   # (1, n_mels, T)
     T_ = mel.shape[2]
-    # T_ = floor((T - n_fft + 2P) / hop_length) + 1, and P = n_fft // 2 = 200 for MelSpectrogram,
-    # (from the docs: "center – whether to pad :attr:`waveform` on both sides so that the t-th frame is centered at time t×hop_length. (Default: True)")
-    # so if then T_ = floor(T / hop_length) + 1 and if for example T = N_SAMPLES = 480,000 and hop_length=160, then T_ = 3000 + 1 = 3001;
-    # but we trim to T_ = 3000 to get a nice number that the encoder will expect,
-    # and avoiding the last frame is not an issue since it often just contains silence and/or is padded with zeros
+    # With center=True (the default), MelSpectrogram pads the waveform by P = n_fft // 2
+    # on both sides before applying the STFT, giving:
+    #   T' = floor((T + 2P - n_fft) / hop_length) + 1
+    #      = floor(T / hop_length) + 1
+    # For example, with T = 480,000 and hop_length = 160: T' = 3,000 + 1 = 3,001.
+    # We drop the last frame to get a clean T' = 3,000, which is what the encoder expects.
+    # This is safe because the final frame typically contains only silence or zero-padding.
     assert T_ == (T // hop_length) + 1
     mel = mel[:,:,:-1]
     log_mel = torch.log10(mel.clamp(min=1e-10))
