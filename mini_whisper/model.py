@@ -77,24 +77,29 @@ class MiniWhisper(nn.Module):
             (batch, seq_len, vocab_size) - Logits over vocabulary
         """
         # Encode audio: (B, n_mels, T) -> (B, T', d_model)
-        z = self.encoder(mel)
+        try:
+            z, len_z = self.encoder(mel)  # If encoder returns both features and lengths
+        except ValueError:
+            z = self.encoder(mel)
+        
 
         # Decode to text: (B, seq_len) -> (B, seq_len, vocab_size)
         logits = self.decoder(tokens, z)  # Using encoder output as cross-attention input
 
         return logits
 
-    def encode_audio(self, mel: torch.Tensor) -> torch.Tensor:
+    def encode_audio(self, mel: torch.Tensor, input_lengths: torch.Tensor | None) -> torch.Tensor:
         """
         Encode audio to features (useful for inference).
 
         Args:
             mel: (batch, n_mels, time) - Log-mel spectrogram
+            input_lengths: (batch,) - Lengths of the input sequences before padding
 
         Returns:
             (batch, seq_len, d_model) - Encoded audio features
         """
-        return self.encoder(mel)
+        return self.encoder(mel, input_lengths)
 
     def decode_tokens(self, tokens: torch.Tensor, audio_features: torch.Tensor) -> torch.Tensor:
         """

@@ -5,9 +5,10 @@ import torchaudio
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from torchaudio.datasets import LIBRISPEECH
-
+from transformers import WhisperTokenizer
 from mini_whisper import N_MEL_BINS
 from mini_whisper.audio import pad_or_trim, compute_log_mel_spectrogram, normalize, SAMPLE_RATE
+from mini_whisper.util import convert_transcripts_to_targets as tokenize_transcripts
 
 
 class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
@@ -86,6 +87,9 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
         self.target_sr = target_sr
         self.n_mel_bins = n_mel_bins
 
+        self.tokenizer = WhisperTokenizer.from_pretrained("openai/whisper-base")
+        self.prefix = self.tokenizer.encode("")[:-1]  # Remove the EOS token from the prefix
+
     def _collate_and_preprocess(self, batch: List[tuple]) -> Dict[str, Any]:
         """
         Collate function that preprocesses raw audio into log-mel spectrograms.
@@ -103,6 +107,8 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
         audio_paths = []
         log_mels = []
         transcripts = []
+        mel_lengths = []
+        tokenized_transcripts = []
 
         for item in batch:
             waveform, sample_rate, transcript, speaker_id, chapter_id, utterance_id = item
@@ -115,6 +121,8 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
             if waveform.shape[0] > 1:
                 waveform = waveform.mean(dim=0, keepdim=True)
 
+            mel_length = compute_log_mel_spectrogram(waveform, n_mel_bins=self.n_mel_bins).shape[2]
+
             # Pad or trim to 30 seconds
             waveform = pad_or_trim(waveform)
 
@@ -126,16 +134,24 @@ class LibriSpeechAudioPreprocessingDataLoader(DataLoader):
 
             # Remove batch dimension: (1, n_mels, T) -> (n_mels, T)
             log_mel = log_mel.squeeze(0)
+            
 
             log_mels.append(log_mel)
             transcripts.append(transcript)
+            mel_lengths.append(mel_length)
             audio_paths.append(f"{speaker_id}/{chapter_id}/{speaker_id}-{chapter_id}-{utterance_id:04d}.flac")
 
         # Stack all log-mels into a single batch tensor
         log_mels = torch.stack(log_mels, dim=0)  # (B, n_mels, T)
+        # Tokenize transcripts to target token IDs, padding to max_len, 
+        # max_len is curretly set to 224 which is the max text length used during training
+        tokenized_transcripts, transcript_lengths = tokenize_transcripts(transcripts, self.tokenizer, max_len=224, prefix_token_ids=self.prefix)
 
         return {
             'audio_path': audio_paths,
             'log_mel': log_mels,
             'transcript': transcripts,
+            'mel_length': mel_lengths,
+            'tokenized_transcript': tokenized_transcripts,
+            'transcript_length': transcript_lengths,
         }

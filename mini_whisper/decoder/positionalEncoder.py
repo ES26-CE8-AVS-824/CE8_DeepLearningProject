@@ -9,7 +9,7 @@ class LearnedPositionalEncoding(nn.Module):
         super().__init__()
         self.positional_embeddings = nn.Embedding(max_len, d_model)
                 
-    def forward(self, x, device="cpu"):
+    def forward(self, x):
         # x: (batch, seq_len)    
         batch_size, seq_len = x.size()
         positions = torch.arange(seq_len, device=self.positional_embeddings.weight.device)

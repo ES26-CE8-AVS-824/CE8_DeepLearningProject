@@ -213,3 +213,4 @@ logs/
 wandb/
 ckpts/
 .idea/
+debugging.py

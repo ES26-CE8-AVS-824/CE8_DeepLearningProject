@@ -60,10 +60,12 @@ class AudioEncoderStem(nn.Module):
         # "and the GELU activation function (Hendrycks & Gimpel, 2016)"
         self.gelu = nn.GELU()
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, input_lengths: torch.Tensor | None) -> torch.Tensor:
         # x: (B, n_mels, T)
         x = self.gelu(self.conv1(x))   # (B, d_model, T)
         x = self.gelu(self.conv2(x))   # (B, d_model, T') where T' = T // 2
+
+       
 
         # Rearrange to (B, T', d_model) for transformer
         x = x.permute(0, 2, 1)
@@ -74,7 +76,11 @@ class AudioEncoderStem(nn.Module):
         pe = sinusoidal_positional_embedding(seq_len, d_model).to(x.device)
         x = x + torch.unsqueeze(pe, dim=0)  # shape=(B, T', d_model) + (T', d_model) -> (B, T', d_model)
 
-        return x
+         # Calculate input lengths 
+        if input_lengths is not None:
+            input_lengths = torch.div(input_lengths - 1, 2, rounding_mode="floor") + 1  
+            return x, input_lengths
+        return x, None
 
 
 # --- Quick sanity check ---
@@ -86,5 +92,5 @@ if __name__ == "__main__":
     print("Log-mel shape:", log_mel_spectrogram.shape)            # e.g. (1, 80, 3000)
 
     stem = AudioEncoderStem(n_mels=80, d_model=512)
-    out = stem(log_mel_spectrogram)
+    out, input_lengths = stem(log_mel_spectrogram, torch.tensor([log_mel_spectrogram.shape[2]]))
     print("Stem output shape:", out.shape)

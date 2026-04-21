@@ -3,21 +3,24 @@ import os
 import re
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 
 import wandb
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
 from mini_whisper.decoder import transcribe_aigen as transcribe_ai
-from eval.wer import jiwer_wer, wer_calc
+from mini_whisper.encoder.ctc_head import CTCHead
+from eval.wer import jiwer_wer
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
-    "total_epochs": 200,
-    "warmup_epochs": 30,
-    "batch_size": 32,
+    "total_epochs": 1,
+    "warmup_epochs": 1,
+    "batch_size_train": 32,
+    "batch_size_val": 16,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
     "num_files": 28539,
@@ -29,10 +32,20 @@ CONFIG = {
     "d_model": 256,
     "label_smoothing": 0.33,
     "adam-w_wait_decay": 0.001,
+    "use_ctc_head": False,
+    # ── Scheduled Sampling ──────────────────────────────────────────────────────
+    # SS kicks in only after LR warmup, so the model is stable before we start
+    # feeding it its own (initially noisy) predictions.
+    # ss_start_epoch : first epoch where ss_prob > 0  (matches warmup_epochs)
+    # ss_ramp_epochs : epochs to linearly ramp from 0 → ss_max_prob
+    # ss_max_prob    : ceiling; 0.5 keeps some teacher signal throughout training
+    "ss_start_epoch": 30,
+    "ss_ramp_epochs": 70,
+    "ss_max_prob": 0.5,
 }
 
-CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
-CONFIG["num_training_steps"] = CONFIG["total_epochs"] * CONFIG["num_files"] // CONFIG["batch_size"]
+CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size_train"]
+CONFIG["num_training_steps"] = CONFIG["total_epochs"] * CONFIG["num_files"] // CONFIG["batch_size_train"]
 
 
 def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, epoch=None, step=None, is_main=True):
@@ -49,7 +62,7 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
             log_mels = batch['log_mel']
             inp = log_mels.to(device)
 
-            targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
+            targets_cpu = batch['tokenized_transcript']
             targets = targets_cpu.to(device, non_blocking=True)
 
             tgt_in = targets[:, :-1]
@@ -69,7 +82,7 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
                 decoded = tokenizer.decode(txt)
 
                 ref = batch['transcript'][i]
-                wer = wer_calc(ref, decoded) #  jiwer_wer(ref, decoded)
+                wer = jiwer_wer(ref, decoded)
                 # if j == 0:
                 total_wer += wer
                 print(f"[{total_examples}] WER beam: {wer:.2%}\n  REF: {ref}\n  HYP: {decoded}\n")
@@ -103,7 +116,7 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
     return mean_wer #, mean_sampling_wer
 
 
-def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1, start_epoch=0, is_main=True):
+def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1, start_epoch=0, is_main=True, ctc_head=None, loss_lambda=0.5):
     steps_per_epoch = len(dataloader)
     global_step = start_epoch * steps_per_epoch
 
@@ -115,16 +128,30 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             log_mels = batch['log_mel']  # (B, n_mels, T)
             log_mels = log_mels.to(DEVICE)
 
-            targets_cpu = convert_transcripts_to_targets(batch['transcript'], tokenizer)
+            targets_cpu = batch['tokenized_transcript']
             targets = targets_cpu.to(DEVICE, non_blocking=True)
 
             optimizer.zero_grad()
             tgt_in = targets[:, :-1]
             tgt_out = targets[:, 1:]
 
+            # Get features and mel lengths just from the encoder, to be used for both CTC and decoder loss
+            z, mel_lengths = model.encoder(log_mels, batch['mel_length'].to(DEVICE, non_blocking=True))  # Pass input lengths for proper handling in the encoder
+            print(f'mel_lengths: {mel_lengths}')
+            # TODO instead of calling encoder twice, pass arguments into decoder
             outputs = model(log_mels, tgt_in)
-            loss = loss_fn(outputs.reshape(-1, outputs.size(-1)),
+
+            loss_cr = loss_fn(outputs.reshape(-1, outputs.size(-1)),
                            tgt_out.reshape(-1))
+            
+            if ctc_head is not None:
+                ctc_softmax_logits = ctc_head(z)
+                loss_ctc = F.ctc_loss(ctc_softmax_logits, tgt_out, mel_lengths, batch['transcript_length'].to(DEVICE, non_blocking=True),
+                      blank=tokenizer.pad_token_id, reduction='mean', zero_infinity=True)
+                loss_lambda = scheduler.get_last_lr()[0] / CONFIG["adam_init_lr"] * loss_lambda  #Scale lambda with scheduler
+                loss = loss_lambda * loss_ctc + (1 - loss_lambda) * loss_cr
+            else:
+                loss = loss_cr
 
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -163,23 +190,6 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                 if wandb.run is not None:
                     wandb.save(model_name)
 
-
-def convert_transcripts_to_targets(transcripts, tokenizer):
-    max_len = CONFIG["max_len"]
-    BATCH_SIZE = len(transcripts)
-
-    prefix = tokenizer.encode("")[:-1]  # Remove the EOS token from the prefix
-
-    seqs = [prefix + tokenizer.encode(t, add_special_tokens=False) + [tokenizer.eos_token_id] for t in transcripts]
-
-    # Pad all sequences to the same length (max_len)
-    txt_padded = torch.full((BATCH_SIZE, max_len), tokenizer.pad_token_id, dtype=torch.long)
-    for i, s in enumerate(seqs):
-        txt_padded[i, :len(s)] = torch.tensor(s[:max_len], dtype=torch.long)
-
-    return txt_padded
-
-
 def load_libriSpeech(split,
                      download_dataset=True,
                      batch_size=16,
@@ -209,27 +219,6 @@ def load_libriSpeech(split,
     print(f"\nCreating DataLoader for: {DATA_DIR}")
     print(f"Batch size: {batch_size}")
     return dataloader
-
-
-# def linear_warmup_lambda(current_step: int):
-# # current_step starts at 0
-#     if current_step >= CONFIG["num_warmup_steps"]:
-#         return 1.0  # stay at peak_lr
-#     return float(current_step + 1) / float(max(1, CONFIG["num_warmup_steps"]))
-
-
-# def warmup_cosine_lambda(current_step: int) -> float:
-#     n_warmup = CONFIG["num_warmup_steps"]  # 17,836
-#     n_total = CONFIG["num_training_steps"]  # 35,673
-#     eta_min_ratio = 0.1  # decay to 10% of peak LR
-#
-#     if current_step < n_warmup:
-#         return (current_step + 1) / n_warmup
-#
-#     # Cosine decay from peak down to eta_min_ratio * peak
-#     progress = (current_step - n_warmup) / (n_total - n_warmup)  # 0 → 1
-#     cosine = 0.5 * (1 + math.cos(math.pi * progress))  # 1 → 0
-#     return eta_min_ratio + (1 - eta_min_ratio) * cosine
 
 def load_model(
         N_MELS=80,
@@ -303,11 +292,6 @@ def load_model(
         weight_decay=CONFIG["adam-w_wait_decay"]
     )
 
-    # scheduler = torch.optim.lr_scheduler.LambdaLR(
-    #     optimizer,
-    #     lr_lambda=warmup_cosine_lambda
-    # )
-
     # https://github.com/huggingface/transformers/blob/e5ad3946209fb96db5e9965b3eb67d69cc3749e0/src/transformers/optimization.py#L389
     scheduler = get_cosine_with_min_lr_schedule_with_warmup_lr_rate(
         optimizer,
@@ -356,12 +340,15 @@ def main(mode: str = "eval",
     if load_from_ckpt_path is not None:
         state = torch.load(load_from_ckpt_path, map_location=device)
         raw.load_state_dict(state)
-        start_epoch = int(re.search(r"epoch-(\d+)", load_from_ckpt_path).group(1))
+        search = re.search(r"epoch-(\d+)", load_from_ckpt_path)
+        if search:
+            start_epoch = int(search.group(1))
 
 
     if is_main:
         print_param_breakdown(raw)
 
+        CONFIG["ckpt_path"] = load_from_ckpt_path
         run = wandb.init(
             project="mini-whisper",
             entity="mini-whisper",
@@ -373,7 +360,7 @@ def main(mode: str = "eval",
 
     if mode == "train":
         train_dataloader = load_libriSpeech('train-clean-100',
-                                            batch_size=CONFIG["batch_size"],
+                                            batch_size=CONFIG["batch_size_train"],
                                             n_mel_bins=CONFIG["n_mel_bins"],
                                             num_workers=CONFIG["num_workers_dataloader"],
                                             sampler=DistributedSampler if distributed else None,
@@ -381,7 +368,7 @@ def main(mode: str = "eval",
                                             rank=local_rank, world_size=world_size)
 
         if validate_during_training:
-            val_dataloader = load_libriSpeech('test-clean', batch_size=1,
+            val_dataloader = load_libriSpeech('test-clean', batch_size=CONFIG["batch_size_val"],
                                               n_mel_bins=CONFIG["n_mel_bins"],
                                               num_workers=CONFIG["num_workers_dataloader"],
                                               sampler=DistributedSampler if distributed else None,
@@ -390,12 +377,19 @@ def main(mode: str = "eval",
         else:
             val_dataloader = None
 
+        if CONFIG["use_ctc_head"]:
+            ctc_head = CTCHead(d_model=CONFIG["d_model"], vocab_size=len(tokenizer)).to(device)
+            if distributed:
+                ctc_head = DDP(ctc_head, device_ids=[device.index], output_device=device.index)
+        else:
+            ctc_head = None
+
         train(model, train_dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, device,
-              epochs=CONFIG["total_epochs"], start_epoch=start_epoch, is_main=is_main)
+              epochs=CONFIG["total_epochs"], start_epoch=start_epoch, is_main=is_main, ctc_head=ctc_head)
 
     elif mode == "eval":
-        val_dataloader = load_libriSpeech('train-clean-100',
-                                          batch_size=16,
+        val_dataloader = load_libriSpeech('test-clean',
+                                          batch_size=CONFIG["batch_size_val"],
                                           n_mel_bins=CONFIG["n_mel_bins"],
                                           num_workers=CONFIG["num_workers_dataloader"],
                                           sampler=DistributedSampler if distributed else None,
@@ -411,7 +405,7 @@ def main(mode: str = "eval",
 if __name__ == "__main__":
     main(
         mode="train",
-        validate_during_training=True,
+        validate_during_training=False,
         distributed=True,
-        load_from_ckpt_path="ckpts/model_2026-04-18_11-31_epoch-70.pth"
+        load_from_ckpt_path="ckpts/model_2026-04-18_15-50_epoch-165.pth"
     )

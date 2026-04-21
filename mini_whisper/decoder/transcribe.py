@@ -28,43 +28,48 @@ def transcribe(model, audio, tokenizer, DEVICE, beam_size: int, max_length: int)
     finished: List[Tuple[List[int], float]] = []
 
     # decoding loop
-    for step in range(max_length):
-        if not hypotheses:
-            break
+    tensors = torch.empty((audio.size(0),), dtype=torch.long, device=DEVICE)  # Placeholder for input tensors
+    model.eval()
+    with torch.no_grad():
+        for batch_idx, audio in enumerate(encoder_output):
+            for step in range(max_length):
+                if not hypotheses:
+                    break
 
-        new_hypotheses = []
+                new_hypotheses = []
 
-        for seq, score in hypotheses:
-            input_ids = torch.tensor([seq], dtype=torch.long, device=DEVICE)  # tensor (shape [1, current_length])
-            logits = model.decoder(input_ids, encoder_output)  # [1, seq_len, vocab]
-            next_logits = logits[0, -1, :]
+                for seq, score in hypotheses:
+                    input_ids = torch.tensor([seq], dtype=torch.long, device=DEVICE)  # tensor (shape [1, current_length])
+                    logits = model.decoder(input_ids, encoder_output)  # [1, seq_len, vocab]
+                    next_logits = logits[0, -1, :]
 
-            log_probs = torch.log_softmax(next_logits, dim=-1)  # log-probabilities conversion
-            topk_logp, topk_ids = torch.topk(log_probs, k=beam_size * 2)  # Get top-k candidates (more than beam_size for diversity)
+                    log_probs = torch.log_softmax(next_logits, dim=-1)  # log-probabilities conversion
+                    topk_logp, topk_ids = torch.topk(log_probs, k=beam_size * 2)  # Get top-k candidates (more than beam_size for diversity)
 
-            for logp, token_id in zip(topk_logp, topk_ids):
-                new_seq = seq + [token_id.item()]
-                new_score = score + logp.item()
+                    for logp, token_id in zip(topk_logp, topk_ids):
+                        new_seq = seq + [token_id.item()]
+                        new_score = score + logp.item()
 
-                if token_id.item() == EOS:
-                    finished.append((new_seq, new_score))
+                        if token_id.item() == EOS:
+                            finished.append((new_seq, new_score))
+                        else:
+                            new_hypotheses.append((new_seq, new_score))
+
+                if new_hypotheses:  # Only keeping the best `beam_size` active hypotheses
+                    new_hypotheses.sort(key=lambda x: x[1], reverse=True)  # highest score first
+                    hypotheses = new_hypotheses[:beam_size]
                 else:
-                    new_hypotheses.append((new_seq, new_score))
+                    hypotheses = []
 
-        if new_hypotheses:  # Only keeping the best `beam_size` active hypotheses
-            new_hypotheses.sort(key=lambda x: x[1], reverse=True)  # highest score first
-            hypotheses = new_hypotheses[:beam_size]
-        else:
-            hypotheses = []
-
-    finished.extend(hypotheses)  # If any still-active hypotheses
-    if not finished:
-        best_seq = prompt
-        best_score = 0.0
-    else:
-        best_seq, best_score = max(finished, key=lambda x: x[1])  # Selecting hypothesis with the highest total log-probability
-    print(f"Best sequence: {best_seq} with score {best_score:.4f}")  # Remove when its working
-    print(f"Decoded {len(best_seq)} tokens (beam_size={beam_size})")
+            finished.extend(hypotheses)  # If any still-active hypotheses
+            if not finished:
+                best_seq = prompt
+                best_score = 0.0
+            else:
+                best_seq, best_score = max(finished, key=lambda x: x[1])  # Selecting hypothesis with the highest total log-probability
+        print(f"Best sequence: {best_seq} with score {best_score:.4f}")  # Remove when its working
+        print(f"Decoded {len(best_seq)} tokens (beam_size={beam_size})")
 
     # Same shape as before:
-    return torch.tensor([best_seq], device=DEVICE)
+        tensors[batch_idx] = torch.tensor([best_seq], device=DEVICE)
+    return tensors
