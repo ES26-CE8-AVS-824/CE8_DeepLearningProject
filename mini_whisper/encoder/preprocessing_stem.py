@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import torch
 from torch import nn
 
@@ -60,7 +62,7 @@ class AudioEncoderStem(nn.Module):
         # "and the GELU activation function (Hendrycks & Gimpel, 2016)"
         self.gelu = nn.GELU()
 
-    def forward(self, x: torch.Tensor, input_lengths: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, input_lengths: torch.Tensor | None = None) -> Tuple[torch.Tensor, torch.Tensor]:
         # x: (B, n_mels, T)
         x = self.gelu(self.conv1(x))   # (B, d_model, T)
         x = self.gelu(self.conv2(x))   # (B, d_model, T') where T' = T // 2

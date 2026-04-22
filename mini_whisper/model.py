@@ -78,9 +78,9 @@ class MiniWhisper(nn.Module):
         """
         # Encode audio: (B, n_mels, T) -> (B, T', d_model)
         try:
-            z, len_z = self.encoder(mel)  # If encoder returns both features and lengths
+            z, len_z = self.encoder(mel, None)  # If encoder returns both features and lengths
         except ValueError:
-            z = self.encoder(mel)
+            z = self.encoder(mel, None)
         
 
         # Decode to text: (B, seq_len) -> (B, seq_len, vocab_size)

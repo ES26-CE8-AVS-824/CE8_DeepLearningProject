@@ -18,10 +18,13 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
-    "total_epochs": 2,
-    "warmup_epochs": 1,
-    "batch_size_train": 4,
+    "total_epochs": 150,
+    "warmup_epochs": 30,
+    "batch_size_train": 32,
     "batch_size_val": 16,
+    # TODO add number of encoder and decoder layers
+    "n_encoder_layers": 4,
+    "n_decoder_layers": 4,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
     "num_files": 28539,
@@ -100,19 +103,19 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
     # print(f"Validation Sampling WER: {mean_sampling_wer:.2%} over {total_examples} examples")
     print(f"Validation Loss: {mean_val:.4f}")
 
-    # Log a scalar per validation run / epoch
-    #    if is_main and wandb.run is not None:
-    #         wandb.log(
-    #             {
-    #                 "val/wer": mean_wer,
-    # #               "val/sampling_wer": mean_sampling_wer,
-    #                 "val/num_examples": total_examples,
-    #                 "val/epoch": epoch,
-    #                 "val/loss": mean_val,
-    #                 "val/perplexity": torch.exp(torch.tensor(mean_val))
-    #             },
-    #             step=step,
-    #         )
+    Log a scalar per validation run / epoch
+       if is_main and wandb.run is not None:
+            wandb.log(
+                {
+                    "val/wer": mean_wer,
+    #               "val/sampling_wer": mean_sampling_wer,
+                    "val/num_examples": total_examples,
+                    "val/epoch": epoch,
+                    "val/loss": mean_val,
+                    "val/perplexity": torch.exp(torch.tensor(mean_val))
+                },
+                step=step,
+            )
 
     return mean_wer  # , mean_sampling_wer
 
@@ -149,8 +152,6 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
 
             # Get features and mel lengths just from the encoder, to be used for both CTC and decoder loss
             z, mel_lengths = inner.encoder(log_mels, torch.tensor(batch['mel_length']).to(DEVICE,
-                                                                                          non_blocking=True))  # Pass input lengths for proper handling in the encoder
-#            print(f'mel_lengths: {mel_lengths}')
 
             # TODO instead of calling encoder twice, pass arguments into decoder
             if ss_prob == 0.0:
@@ -179,15 +180,6 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                 outputs = inner(log_mels, mixed_input)  # (B, T, vocab)
                 loss_cr = loss_fn(outputs.reshape(-1, outputs.size(-1)), tgt_out.reshape(-1))
 
-                # DEBUG: print 1) ground truth tokens 2) first pass prediction 3) mixed input
-                # print("\nDEBUG SCHEDULED SAMPLING:")
-                # for j in range(B):
-                #     gt_tokens = tokenizer.decode(tgt_out[j].cpu().numpy(), skip_special_tokens=False)
-                #     pred_tokens = tokenizer.decode(preds[j].cpu().numpy(), skip_special_tokens=False)
-                #     mixed_tokens = tokenizer.decode(mixed_input[j].cpu().numpy(), skip_special_tokens=False)
-                #     print(f"  GT: {gt_tokens}")
-                #     print(f"  PRED: {pred_tokens}")
-                #     print(f"  MIXED: {mixed_tokens}")
 
             if ctc_head is not None:
                 ctc_softmax_logits = ctc_head(z)
@@ -199,21 +191,20 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                 loss = loss_lambda * loss_ctc + (1 - loss_lambda) * loss_cr
             else:
                 loss = loss_cr
-#            print()
 
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(inner.parameters(), max_norm=1.0)
             optimizer.step()
 
-            # if is_main and wandb.run is not None:
-            # wandb.log(
-            #     {
-            #         "train/grad_norm": grad_norm,
-            #         "train/loss": loss.item(),
-            #         "train/epoch": epoch
-            #     },
-            #     step=global_step,
-            # )
+            if is_main and wandb.run is not None:
+            wandb.log(
+                {
+                    "train/grad_norm": grad_norm,
+                    "train/loss": loss.item(),
+                    "train/epoch": epoch
+                },
+                step=global_step,
+            )
             global_step += 1
 
             if i % 100 == 0:
@@ -240,9 +231,8 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                 model_name = f"ckpts/model_{ts}_epoch-{epoch + 1}.pth"
                 inner = model.module if hasattr(model, 'module') else model
                 torch.save(inner.state_dict(), model_name)
-                # if wandb.run is not None:
-                #     wandb.save(model_name)
-
+                if wandb.run is not None:
+                    wandb.save(model_name)
 
 def load_libriSpeech(split,
                      download_dataset=True,
@@ -279,7 +269,8 @@ def load_model(
         N_MELS=80,
         D_MODEL=128,
         N_HEADS=4,
-        N_LAYERS=4,
+        N_ENCODER_LAYERS=4,
+        N_DECODER_LAYERS=4,
         MAX_LEN=448,
         local_rank: int = 0,
         device: str = "cuda",
@@ -295,7 +286,8 @@ def load_model(
         N_MELS (int): The number of mel bins to use. Defaults to 80.
         D_MODEL (int): The dimensionality of the model. Defaults to 128.
         N_HEADS (int): The number of attention heads. Defaults to 4.
-        N_LAYERS (int): The number of encoder and decoder layers. Defaults to 4.
+        N_ENCODER_LAYERS (int): The number of encoder layers. Defaults to 4.
+        N_DECODER_LAYERS (int): The number of decoder layers. Defaults to 4.
         MAX_LEN (int): The maximum length of the text to generate. Defaults to 448.
     Returns:
         model (MiniWhisper): The loaded MiniWhisper model.
@@ -306,8 +298,6 @@ def load_model(
         DEVICE (torch.device): The device to use for training.
     """
 
-    N_ENCODER_LAYERS = N_LAYERS
-    N_DECODER_LAYERS = N_LAYERS
     MAX_TEXT_LEN = MAX_LEN
 
     print("=" * 60)
@@ -354,7 +344,7 @@ def load_model(
         num_training_steps=CONFIG["num_training_steps"],
         num_cycles=0.5,  # single half‑cosine
         min_lr_rate=0.1,  # decay to 10% of initial lr (= eta_min_ratio)
-        warmup_lr_rate=None,  # initial lr: NOne to start at (step+1)/num_warmup_steps
+        warmup_lr_rate=None,  # initial lr: None to start at (step+1)/num_warmup_steps
     )
 
     return model, loss_fn, optimizer, scheduler, tokenizer
@@ -381,6 +371,8 @@ def main(mode: str = "eval",
 
     model, loss_fn, optimizer, scheduler, tokenizer = load_model(
         D_MODEL=CONFIG["d_model"],
+        N_ENCODER_LAYERS=CONFIG["n_encoder_layers"],
+        N_DECODER_LAYERS=CONFIG["n_decoder_layers"],
         local_rank=local_rank,
         device=device,
         distributed=distributed,
@@ -433,6 +425,7 @@ def main(mode: str = "eval",
 
         if CONFIG["use_ctc_head"]:
             ctc_head = CTCHead(in_dim=CONFIG["d_model"], vocab_size=len(tokenizer)).to(device)
+            ctc_head = CTCHead(in_dim=CONFIG["d_model"], vocab_size=len(tokenizer)).to(device)
             if distributed:
                 ctc_head = DDP(ctc_head, device_ids=[device.index], output_device=device.index)
         else:
@@ -459,7 +452,7 @@ def main(mode: str = "eval",
 if __name__ == "__main__":
     main(
         mode="train",
-        validate_during_training=False,
-        distributed=False,
+        validate_during_training=True,
+        distributed=True,
         load_from_ckpt_path=None
     )
