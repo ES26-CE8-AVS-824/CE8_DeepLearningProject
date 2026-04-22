@@ -395,14 +395,14 @@ def main(mode: str = "eval",
         print_param_breakdown(raw)
 
         CONFIG["ckpt_path"] = load_from_ckpt_path
-        # run = wandb.init(
-        #     project="mini-whisper",
-        #     entity="mini-whisper",
-        #     config=CONFIG,
-        #     name=f"mini-whisper-{mode}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
-        # )
+        run = wandb.init(
+            project="mini-whisper",
+            entity="mini-whisper",
+            config=CONFIG,
+            name=f"mini-whisper-{mode}-{datetime.datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        )
 
-        # run.watch(model, log="all", log_freq=100)
+        run.watch(model, log="all", log_freq=100)
 
     if mode == "train":
         train_dataloader = load_libriSpeech('dev-clean',
@@ -425,7 +425,6 @@ def main(mode: str = "eval",
 
         if CONFIG["use_ctc_head"]:
             ctc_head = CTCHead(in_dim=CONFIG["d_model"], vocab_size=len(tokenizer)).to(device)
-            ctc_head = CTCHead(in_dim=CONFIG["d_model"], vocab_size=len(tokenizer)).to(device)
             if distributed:
                 ctc_head = DDP(ctc_head, device_ids=[device.index], output_device=device.index)
         else:
@@ -445,8 +444,8 @@ def main(mode: str = "eval",
         validate(model, val_dataloader, tokenizer, device, loss_fn, is_main=is_main)
     if distributed and dist.is_initialized():
         dist.destroy_process_group()
-    # if is_main:
-    #     run.finish()
+    if is_main:
+        run.finish()
 
 
 if __name__ == "__main__":
