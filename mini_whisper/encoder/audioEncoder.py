@@ -13,7 +13,7 @@ class AudioEncoder(nn.Module):
             SimpleTransformerBlock(d_model, n_heads, dropout=dropout) for _ in range(n_layers)
         ])
 
-    def forward(self, x: torch.Tensor, input_lengths: torch.Tensor | None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, input_lengths: torch.Tensor | None = None) -> torch.Tensor:
         # x: (B, n_mels, T)
         x, input_lengths = self.stem(x, input_lengths)  # (B, T', d_model)
         for block in self.transformer_encoder_blocks:
