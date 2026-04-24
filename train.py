@@ -5,47 +5,37 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-# import wandb
+import wandb
 from mini_whisper import *
 from mini_whisper.model import MiniWhisper
 from mini_whisper.decoder import transcribe
 from mini_whisper.decoder import transcribe_aigen as transcribe_ai
 from mini_whisper.encoder.ctc_head import CTCHead
-from mini_whisper.util import get_ss_probability
+from mini_whisper.sampling import SamplingConfig, apply_scheduled_sampling
 from eval.wer import wer_calc
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
-    "total_epochs": 150,
-    "warmup_epochs": 30,
-    "batch_size_train": 32,
+    "total_epochs": 100,
+    "warmup_epochs": 10,
+    "batch_size_train": 64,
     "batch_size_val": 16,
-    # TODO add number of encoder and decoder layers
     "n_encoder_layers": 4,
     "n_decoder_layers": 4,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
-    "num_files": 28539,
-    "max_len": 224,
+    "num_files": 104_014,  # train-clean-100: 28_539,
+    "max_len": 250,
     "adam_init_lr": 1e-3,
     "adam_betas": (0.9, 0.95),
     "n_mel_bins": 80,
-    "num_workers_dataloader": 4,
-    "d_model": 16,
-    "label_smoothing": 0.33,
+    "num_workers_dataloader": 8,
+    "d_model": 384,
+    "label_smoothing": 0.1,
     "adam-w_wait_decay": 0.001,
     "use_ctc_head": True,
-    # ── Scheduled Sampling ──────────────────────────────────────────────────────
-    # SS kicks in only after LR warmup, so the model is stable before we start
-    # feeding it its own (initially noisy) predictions.
-    # ss_start_epoch : first epoch where ss_prob > 0  (matches warmup_epochs)
-    # ss_ramp_epochs : epochs to linearly ramp from 0 → ss_max_prob
-    # ss_max_prob    : ceiling; 0.5 keeps some teacher signal throughout training
-    "ss_start_epoch": 0,
-    "ss_ramp_epochs": 3,
-    "ss_max_prob": 0.5,
 }
 
 CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size_train"]
@@ -103,116 +93,101 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
     # print(f"Validation Sampling WER: {mean_sampling_wer:.2%} over {total_examples} examples")
     print(f"Validation Loss: {mean_val:.4f}")
 
-    Log a scalar per validation run / epoch
-       if is_main and wandb.run is not None:
-            wandb.log(
-                {
-                    "val/wer": mean_wer,
-    #               "val/sampling_wer": mean_sampling_wer,
-                    "val/num_examples": total_examples,
-                    "val/epoch": epoch,
-                    "val/loss": mean_val,
-                    "val/perplexity": torch.exp(torch.tensor(mean_val))
-                },
-                step=step,
-            )
+    # Log a scalar per validation run / epoch
+    if is_main and wandb.run is not None:
+        wandb.log(
+            {
+                "val/wer": mean_wer,
+                #               "val/sampling_wer": mean_sampling_wer,
+                "val/num_examples": total_examples,
+                "val/epoch": epoch,
+                "val/loss": mean_val,
+                "val/perplexity": torch.exp(torch.tensor(mean_val))
+            },
+            step=step,
+        )
 
     return mean_wer  # , mean_sampling_wer
 
 
 def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, tokenizer, DEVICE, epochs=1, start_epoch=0,
-          is_main=True, ctc_head=None, loss_lambda=0.5):
+          is_main=True, ctc_head=None, loss_lambda=0.5, sampling_cfg: SamplingConfig = None):
+    if sampling_cfg is None:
+        sampling_cfg = SamplingConfig()  # defaults to teacher_forcing
+
     steps_per_epoch = len(dataloader)
     global_step = start_epoch * steps_per_epoch
+
+    if is_main:
+        if sampling_cfg.mode == "greedy":
+            print(f"  decay={sampling_cfg.decay_mode!r}  k={sampling_cfg.decay_k}", end="")
+        elif sampling_cfg.mode == "confidence_aware":
+            print(f"  t_golden={sampling_cfg.t_golden}  t_rand={sampling_cfg.t_rand}", end="")
+        print()
 
     for epoch in range(start_epoch, start_epoch + epochs):
         model.train()
 
         inner = model.module if hasattr(model, 'module') else model
 
-        ss_prob = get_ss_probability(epoch,
-            start_epoch=CONFIG["ss_start_epoch"],
-            ramp_epochs = CONFIG["ss_ramp_epochs"],
-            max_p = CONFIG["ss_max_prob"])
-        if is_main:
-            print(f"\n── Epoch {epoch + 1}  |  ss_prob={ss_prob:.3f} ──")
-
         if isinstance(dataloader.sampler, DistributedSampler):
             dataloader.sampler.set_epoch(epoch)
         for i, batch in enumerate(dataloader):
-            log_mels = batch['log_mel']  # (B, n_mels, T)
-            log_mels = log_mels.to(DEVICE)
+            log_mels = batch['log_mel'].to(DEVICE)  # (B, n_mels, T)
+            targets = batch['tokenized_transcript'].to(DEVICE, non_blocking=True)
 
-            targets_cpu = batch['tokenized_transcript']
-            targets = targets_cpu.to(DEVICE, non_blocking=True)
+            tgt_in = targets[:, :-1]  # [BOS, t1, t2, ..., t_{n-1}]
+            tgt_out = targets[:, 1:]  # [t1,  t2, t3, ..., t_n    ]
 
             optimizer.zero_grad()
-            tgt_in = targets[:, :-1]
-            tgt_out = targets[:, 1:]
+
+            # Apply scheduled sampling (if given)
+            tgt_in_modified, ss_stats = apply_scheduled_sampling(
+                inner, log_mels, tgt_in, global_step, DEVICE, sampling_cfg
+            )
 
             # Get features and mel lengths just from the encoder, to be used for both CTC and decoder loss
-            z, mel_lengths = inner.encoder(log_mels, torch.tensor(batch['mel_length']).to(DEVICE,
-
-            # TODO instead of calling encoder twice, pass arguments into decoder
-            if ss_prob == 0.0:
-                outputs = inner(log_mels, tgt_in)
-                loss_cr = loss_fn(outputs.reshape(-1, outputs.size(-1)),
-                                  tgt_out.reshape(-1))
-            else:
-                # Scheduled sampling
-                B, T = tgt_in.shape
-
-                # ── Pass 1: get model predictions (no gradient needed) ──────────────────
-                with torch.no_grad():
-                    logits_tf = inner(log_mels, tgt_in)  # (B, T, vocab)
-                    preds = logits_tf.argmax(dim=-1)  # (B, T)
-
-                # ── Mix ground-truth and model predictions ───────────────────────────────
-                # shifted_preds[i] = preds[i-1]: what the model predicted for position i.
-                shifted_preds = torch.cat([tgt_in[:, :1], preds[:, :-1]], dim=1)  # (B, T)
-
-                # Sample a random mask; never replace positions 0 and 1 (prefix: SOT + no-timestamps).
-                use_pred = torch.rand(B, T, device=DEVICE) < ss_prob  # (B, T) bool
-                use_pred[:, 0:2] = False
-                mixed_input = torch.where(use_pred, shifted_preds, tgt_in)  # (B, T)
-
-                # ── Pass 2: forward on mixed input, compute loss, keep gradients ─────────
-                outputs = inner(log_mels, mixed_input)  # (B, T, vocab)
-                loss_cr = loss_fn(outputs.reshape(-1, outputs.size(-1)), tgt_out.reshape(-1))
-
+            z, mel_lengths = inner.encoder(log_mels, torch.tensor(batch['mel_length'])
+                                           .to(DEVICE,
+                                               non_blocking=True))  # Pass input lengths for proper handling in the encoder
+            # ... and use this also as the main pass
+            logits = inner.decoder(tgt_in_modified, z)
+            loss_cr = loss_fn(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
 
             if ctc_head is not None:
                 ctc_softmax_logits = ctc_head(z)
                 loss_ctc = F.ctc_loss(ctc_softmax_logits, tgt_out, mel_lengths,
                                       batch['transcript_length'].to(DEVICE, non_blocking=True),
                                       blank=tokenizer.pad_token_id, reduction='mean', zero_infinity=True)
-                loss_lambda = scheduler.get_last_lr()[0] / CONFIG[
+                effective_lambda = scheduler.get_last_lr()[0] / CONFIG[
+                    # # BUG FIX 1: this loss_lambda was overwriting the loss_lambda input parameter on every step;
                     "adam_init_lr"] * loss_lambda  # Scale lambda with scheduler
-                loss = loss_lambda * loss_ctc + (1 - loss_lambda) * loss_cr
+                loss = effective_lambda * loss_ctc + (1 - effective_lambda) * loss_cr
             else:
                 loss = loss_cr
+                loss_ctc = None  # BUG FIX 2: was referenced in wandb.log but could be undefined
 
             loss.backward()
-            grad_norm = torch.nn.utils.clip_grad_norm_(inner.parameters(), max_norm=1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
 
             if is_main and wandb.run is not None:
-            wandb.log(
-                {
+                log_dict = {
                     "train/grad_norm": grad_norm,
                     "train/loss": loss.item(),
-                    "train/epoch": epoch
-                },
-                step=global_step,
-            )
+                    "train/loss_cr": loss_cr.item(),
+                    "train/epoch": epoch,
+                    **ss_stats
+                }
+                if ctc_head is not None:
+                    log_dict["train/loss_ctc"] = loss_ctc.item()
+                    wandb.log(log_dict, step=global_step)
             global_step += 1
 
             if i % 100 == 0:
                 print(f'Epoch {epoch + 1}, Batch {i}, Loss: {float(loss.item())}')
 
-            del log_mels, targets, tgt_in, tgt_out, outputs, z, loss, loss_cr
-            if ss_prob > 0.0:
-                del logits_tf, preds, shifted_preds, use_pred, mixed_input
+            del log_mels, targets, tgt_in, tgt_out, tgt_in_modified, z, logits, loss, loss_cr
             if ctc_head is not None:
                 del ctc_softmax_logits, loss_ctc
             # torch.cuda.memory.empty_cache()
@@ -233,6 +208,7 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
                 torch.save(inner.state_dict(), model_name)
                 if wandb.run is not None:
                     wandb.save(model_name)
+
 
 def load_libriSpeech(split,
                      download_dataset=True,
@@ -405,7 +381,7 @@ def main(mode: str = "eval",
         run.watch(model, log="all", log_freq=100)
 
     if mode == "train":
-        train_dataloader = load_libriSpeech('dev-clean',
+        train_dataloader = load_libriSpeech('train-clean-360',
                                             batch_size=CONFIG["batch_size_train"],
                                             n_mel_bins=CONFIG["n_mel_bins"],
                                             num_workers=CONFIG["num_workers_dataloader"],
@@ -414,7 +390,7 @@ def main(mode: str = "eval",
                                             rank=local_rank, world_size=world_size)
 
         if validate_during_training:
-            val_dataloader = load_libriSpeech('test-clean', batch_size=CONFIG["batch_size_val"],
+            val_dataloader = load_libriSpeech('dev-clean', batch_size=CONFIG["batch_size_val"],
                                               n_mel_bins=CONFIG["n_mel_bins"],
                                               num_workers=CONFIG["num_workers_dataloader"],
                                               sampler=DistributedSampler if distributed else None,
@@ -449,6 +425,11 @@ def main(mode: str = "eval",
 
 
 if __name__ == "__main__":
+    sampling = SamplingConfig(
+        mode="confidence_aware",
+        t_golden=0.9,  # replace with predicted token above this confidence
+        t_rand=0.95,  # additionally inject a random token above this confidence
+    )
     main(
         mode="train",
         validate_during_training=True,

@@ -88,20 +88,3 @@ def convert_transcripts_to_targets(transcripts, tokenizer, max_len, prefix_token
     transcript_len = torch.tensor([min(len(s), max_len) for s in seqs], dtype=torch.long)
 
     return txt_padded, transcript_len
-
-
-def get_ss_probability(epoch: int, start_epoch: int, ramp_epochs: int, max_p: float) -> float:
-    """
-    Linear schedule for scheduled-sampling probability.
-
-    Returns 0 until ss_start_epoch, then ramps linearly from 0 to ss_max_prob
-    over ss_ramp_epochs, after which it stays at ss_max_prob.
-
-    Using epoch (not global_step) keeps the schedule independent of batch size
-    and easy to reason about when resuming from a checkpoint.
-    """
-
-    if epoch < start_epoch:
-        return 0.0
-    progress = min(1.0, (epoch - start_epoch + 1) / ramp_epochs)
-    return max_p * progress
