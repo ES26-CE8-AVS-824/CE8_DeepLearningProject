@@ -1,4 +1,6 @@
 import torch
+
+
 def _decoder_prefix(tokenizer):
     prompt_tokens = tokenizer.encode("")
     if len(prompt_tokens) < 2:
@@ -18,9 +20,9 @@ def _decode_step(model, tokens, encoder_output):
     return model.decoder(tokens, encoder_output)
 
 
-def _encode_audio(model, audio):
+def _encode_audio(model, audio, input_lengths):
     if hasattr(model, "encode_audio"):
-        return model.encode_audio(audio)
+        return model.encode_audio(audio, input_lengths)
     return model.encoder(audio)
 
 
@@ -119,16 +121,17 @@ def _finalize_sequences(sequences, eos_token_id, pad_token_id, device):
 
 
 def transcribe(
-    model,
-    audio,
-    tokenizer,
-    DEVICE,
-    max_new_tokens=100,
-    beam_width=1,
-    length_penalty=0.6,
-    temperature=1.0,
-    top_k=None,
-    top_p=None,
+        model,
+        audio,
+        mel_lengths,
+        tokenizer,
+        DEVICE,
+        max_new_tokens=100,
+        beam_width=1,
+        length_penalty=0.6,
+        temperature=1.0,
+        top_k=None,
+        top_p=None,
 ):
     """Transcribe a batch of mel spectrograms.
 
@@ -140,6 +143,7 @@ def transcribe(
         return transcribe_beam_search(
             model,
             audio,
+            mel_lengths,
             tokenizer,
             DEVICE,
             beam_width=beam_width,
@@ -150,6 +154,7 @@ def transcribe(
         return transcribe_sampling(
             model,
             audio,
+            mel_lengths,
             tokenizer,
             DEVICE,
             max_new_tokens=max_new_tokens,
@@ -172,7 +177,7 @@ def transcribe(
     model.eval()
     try:
         with torch.no_grad():
-            encoder_output = _encode_audio(model, audio)
+            encoder_output, _ = _encode_audio(model, audio, mel_lengths)
             for _ in range(max_new_tokens):
                 logits = _decode_step(model, decoder_input, encoder_output)
                 next_tokens = torch.argmax(logits[:, -1, :], dim=-1)
@@ -194,14 +199,15 @@ def transcribe(
 
 
 def transcribe_sampling(
-    model,
-    audio,
-    tokenizer,
-    DEVICE,
-    max_new_tokens=100,
-    temperature=1.0,
-    top_k=None,
-    top_p=None,
+        model,
+        audio,
+        mel_lengths,
+        tokenizer,
+        DEVICE,
+        max_new_tokens=100,
+        temperature=1.0,
+        top_k=None,
+        top_p=None,
 ):
     """Transcribe a batch with temperature-scaled sampling.
 
@@ -222,7 +228,7 @@ def transcribe_sampling(
     model.eval()
     try:
         with torch.no_grad():
-            encoder_output = _encode_audio(model, audio)
+            encoder_output, _ = _encode_audio(model, audio, mel_lengths)
             for _ in range(max_new_tokens):
                 logits = _decode_step(model, decoder_input, encoder_output)
                 next_tokens = _sample_next_tokens(
@@ -249,13 +255,14 @@ def transcribe_sampling(
 
 
 def transcribe_beam_search(
-    model,
-    audio,
-    tokenizer,
-    DEVICE,
-    beam_width=5,
-    max_new_tokens=100,
-    length_penalty=0.6,
+        model,
+        audio,
+        mel_lengths,
+        tokenizer,
+        DEVICE,
+        beam_width=5,
+        max_new_tokens=100,
+        length_penalty=0.6,
 ):
     """Transcribe a batch with beam search.
 
@@ -284,7 +291,7 @@ def transcribe_beam_search(
     model.eval()
     try:
         with torch.no_grad():
-            encoder_output = _encode_audio(model, audio)
+            encoder_output, _ = _encode_audio(model, audio, mel_lengths)
 
             for _ in range(max_new_tokens):
                 active_sequences = []
@@ -368,5 +375,3 @@ def transcribe_beam_search(
         best_sequences.append(best_beam["tokens"][prefix_length:])
 
     return _finalize_sequences(best_sequences, eos_token_id, pad_token_id, DEVICE)
-
-
