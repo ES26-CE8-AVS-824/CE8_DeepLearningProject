@@ -20,19 +20,19 @@ from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_
 CONFIG = {
     "total_epochs": 100,
     "warmup_epochs": 10,
-    "batch_size_train": 64,
-    "batch_size_val": 16,
+    "batch_size_train": 12,
+    "batch_size_val": 12,
     "n_encoder_layers": 4,
     "n_decoder_layers": 4,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
     "num_files": 104_014,  # train-clean-100: 28_539,
-    "max_len": 250,
-    "adam_init_lr": 1e-3,
+    "max_len": 224,
+    "adam_init_lr": 2e-4,
     "adam_betas": (0.9, 0.95),
     "n_mel_bins": 80,
     "num_workers_dataloader": 8,
-    "d_model": 384,
+    "d_model": 256,
     "label_smoothing": 0.1,
     "adam-w_wait_decay": 0.001,
     "use_ctc_head": True,
@@ -53,22 +53,20 @@ def validate(model, dataloader, tokenizer, device, loss_fn, num_batches=None, ep
             if num_batches is not None and i >= num_batches:
                 break
 
-            log_mels = batch['log_mel']
-            inp = log_mels.to(device)
-
-            targets_cpu = batch['tokenized_transcript']
-            targets = targets_cpu.to(device, non_blocking=True)
+            inp_log_mels = batch['log_mel'].to(device)
+            targets = batch['tokenized_transcript'].to(device)
+            mel_lengths = torch.tensor(batch['mel_length']).to(device)
 
             tgt_in = targets[:, :-1]
             tgt_out = targets[:, 1:]
 
-            outputs = model(inp, tgt_in)
+            outputs = model(inp_log_mels, tgt_in)
             loss = loss_fn(outputs.reshape(-1, outputs.size(-1)),
                            tgt_out.reshape(-1))
             val_loss += loss.item()
 
             raw = model.module if hasattr(model, 'module') else model
-            text_outputs = transcribe_ai.transcribe(raw, inp, tokenizer, device, max_new_tokens=100, beam_width=5,
+            text_outputs = transcribe_ai.transcribe(raw, inp_log_mels, mel_lengths, tokenizer, device, max_new_tokens=100, beam_width=5,
                                                     length_penalty=0.6)
             # text_outputs = transcribe(model, inp, tokenizer, device, beam_size=5, max_length=100)
             # text_outputs_2 = transcribe_ai.transcribe_sampling(raw, inp, tokenizer, device, max_new_tokens=100, temperature=0.8, top_k=None, top_p=0.95)
@@ -134,7 +132,7 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             dataloader.sampler.set_epoch(epoch)
         for i, batch in enumerate(dataloader):
             log_mels = batch['log_mel'].to(DEVICE)  # (B, n_mels, T)
-            targets = batch['tokenized_transcript'].to(DEVICE, non_blocking=True)
+            targets = batch['tokenized_transcript'].to(DEVICE)
 
             tgt_in = targets[:, :-1]  # [BOS, t1, t2, ..., t_{n-1}]
             tgt_out = targets[:, 1:]  # [t1,  t2, t3, ..., t_n    ]
@@ -147,9 +145,7 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             )
 
             # Get features and mel lengths just from the encoder, to be used for both CTC and decoder loss
-            z, mel_lengths = inner.encoder(log_mels, torch.tensor(batch['mel_length'])
-                                           .to(DEVICE,
-                                               non_blocking=True))  # Pass input lengths for proper handling in the encoder
+            z, mel_lengths = inner.encoder(log_mels, torch.tensor(batch['mel_length']).to(DEVICE))  # Pass input lengths for proper handling in the encoder
             # ... and use this also as the main pass
             logits = inner.decoder(tgt_in_modified, z)
             loss_cr = loss_fn(logits.reshape(-1, logits.size(-1)), tgt_out.reshape(-1))
@@ -157,7 +153,7 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             if ctc_head is not None:
                 ctc_softmax_logits = ctc_head(z)
                 loss_ctc = F.ctc_loss(ctc_softmax_logits, tgt_out, mel_lengths,
-                                      batch['transcript_length'].to(DEVICE, non_blocking=True),
+                                      batch['transcript_length'].to(DEVICE),
                                       blank=tokenizer.pad_token_id, reduction='mean', zero_infinity=True)
                 effective_lambda = scheduler.get_last_lr()[0] / CONFIG[
                     # # BUG FIX 1: this loss_lambda was overwriting the loss_lambda input parameter on every step;
@@ -174,7 +170,7 @@ def train(model, dataloader, val_dataloader, optimizer, scheduler, loss_fn, toke
             if is_main and wandb.run is not None:
                 log_dict = {
                     "train/grad_norm": grad_norm,
-                    "train/loss": loss.item(),
+#                   "train/loss": loss.item(),
                     "train/loss_cr": loss_cr.item(),
                     "train/epoch": epoch,
                     **ss_stats
@@ -410,7 +406,7 @@ def main(mode: str = "eval",
               epochs=CONFIG["total_epochs"], start_epoch=start_epoch, is_main=is_main, ctc_head=ctc_head)
 
     elif mode == "eval":
-        val_dataloader = load_libriSpeech('dev-clean',
+        val_dataloader = load_libriSpeech('train-clean-360',
                                           batch_size=CONFIG["batch_size_val"],
                                           n_mel_bins=CONFIG["n_mel_bins"],
                                           num_workers=CONFIG["num_workers_dataloader"],
@@ -432,7 +428,7 @@ if __name__ == "__main__":
     )
     main(
         mode="train",
-        validate_during_training=True,
+        validate_during_training=False,
         distributed=True,
-        load_from_ckpt_path=None
+        load_from_ckpt_path=None  # "ckpts/model_2026-04-25_12-40_epoch-15.pth"
     )
