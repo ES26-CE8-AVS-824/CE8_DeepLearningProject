@@ -18,24 +18,24 @@ from torch.utils.data.distributed import DistributedSampler
 from transformers import WhisperTokenizer, get_cosine_with_min_lr_schedule_with_warmup_lr_rate
 
 CONFIG = {
-    "total_epochs": 100,
-    "warmup_epochs": 10,
-    "batch_size_train": 12,
-    "batch_size_val": 12,
+    "total_epochs": 300,
+    "warmup_epochs": 30,
+    "batch_size_train": 32,
+    "batch_size_val": 16,
     "n_encoder_layers": 4,
     "n_decoder_layers": 4,
     # where 28539 is the number of files, 10 is the number of epochs wanted and 16 is the batch size
     # Hardcoded for now but TODO remove this as a global
-    "num_files": 104_014,  # train-clean-100: 28_539,
+    "num_files": 28_539, #train-clean-360 104_014, train-clean-100: 28_539,
     "max_len": 224,
-    "adam_init_lr": 2e-4,
+    "adam_init_lr": 1e-3,
     "adam_betas": (0.9, 0.95),
     "n_mel_bins": 80,
     "num_workers_dataloader": 8,
     "d_model": 256,
-    "label_smoothing": 0.1,
+    "label_smoothing": 0.33,
     "adam-w_wait_decay": 0.001,
-    "use_ctc_head": True,
+    "use_ctc_head": False,
 }
 
 CONFIG["num_warmup_steps"] = CONFIG["warmup_epochs"] * CONFIG["num_files"] // CONFIG["batch_size_train"]
@@ -427,8 +427,8 @@ if __name__ == "__main__":
         t_rand=0.95,  # additionally inject a random token above this confidence
     )
     main(
-        mode="train",
+        mode="eval",
         validate_during_training=False,
-        distributed=True,
-        load_from_ckpt_path=None  # "ckpts/model_2026-04-25_12-40_epoch-15.pth"
+        distributed=False,
+        load_from_ckpt_path="ckpts/model_2026-04-19_01-34_epoch-270.pth"
     )
